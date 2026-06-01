@@ -8,10 +8,35 @@ import {
   useParams,
 } from 'react-router-dom'
 import Peer from 'peerjs'
+import {
+  Camera,
+  Copy,
+  Check,
+  Maximize2,
+  Minimize2,
+  Mic,
+  MicOff,
+  Play,
+  Square,
+  RefreshCw,
+  LogOut,
+  Lock,
+  Eye,
+  Video,
+  VideoOff,
+  Wifi,
+  WifiOff,
+  AlertTriangle,
+  Volume2,
+  ExternalLink,
+  ShieldCheck,
+  Loader2,
+  Radio,
+  ArrowLeft,
+} from 'lucide-react'
 import './App.css'
 
-// Well-known PeerJS ID for the admin presence registry. Only one admin
-// dashboard can hold this ID at a time on the PeerJS public broker.
+// Well-known PeerJS ID for the admin presence registry.
 const ADMIN_PEER_ID = 'hawk-admin-presence-mwhawk-v1'
 const ADMIN_PIN = '2001'
 const PRESENCE_HEARTBEAT_MS = 5000
@@ -34,9 +59,7 @@ function readResumeSession() {
 function writeResumeSession(session) {
   try {
     localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(session))
-  } catch {
-    // storage may be unavailable; non-fatal
-  }
+  } catch { /* noop */ }
 }
 
 function clearResumeSession() {
@@ -58,17 +81,10 @@ function classifyCamera(device, allDevices) {
   const searchable = [device.label, device.deviceId, device.groupId]
     .filter(Boolean)
     .join(' ')
-
-  if (BUILTIN_HINTS.test(searchable)) {
-    return { isUsb: false, isBuiltIn: true }
-  }
-  if (USB_HINTS.test(searchable)) {
-    return { isUsb: true, isBuiltIn: false }
-  }
+  if (BUILTIN_HINTS.test(searchable)) return { isUsb: false, isBuiltIn: true }
+  if (USB_HINTS.test(searchable)) return { isUsb: true, isBuiltIn: false }
   const videoCount = allDevices.filter((d) => d.kind === 'videoinput').length
-  if (videoCount === 1 && device.label) {
-    return { isUsb: true, isBuiltIn: false }
-  }
+  if (videoCount === 1 && device.label) return { isUsb: true, isBuiltIn: false }
   return { isUsb: false, isBuiltIn: false }
 }
 
@@ -78,29 +94,20 @@ async function acquireStream(deviceId) {
     noiseSuppression: true,
     autoGainControl: true,
   }
-
   const videoAttempts = []
   if (deviceId) {
     videoAttempts.push({
       deviceId: { exact: deviceId },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 30, max: 30 },
+      width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 },
     })
     videoAttempts.push({
       deviceId: { exact: deviceId },
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-      frameRate: { ideal: 24, max: 30 },
+      width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 },
     })
     videoAttempts.push({ deviceId: { exact: deviceId } })
     videoAttempts.push({ deviceId })
   }
-  videoAttempts.push({
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-    frameRate: { ideal: 30, max: 30 },
-  })
+  videoAttempts.push({ width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } })
   videoAttempts.push({ width: { ideal: 640 }, height: { ideal: 480 } })
   videoAttempts.push(true)
 
@@ -133,21 +140,23 @@ function tuneSenderBitrate(call) {
       })
       sender.setParameters(params).catch(() => {})
     })
-  } catch {
-    // best-effort
-  }
+  } catch { /* best-effort */ }
 }
 
-function HomePage() {
-  return (
-    <main className="page">
-      <BroadcasterPage />
-      <p className="adminFooter">
-        <Link to="/admin">Admin dashboard</Link>
-      </p>
-    </main>
-  )
+function formatDuration(ms) {
+  if (!ms || ms < 0) return '0s'
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }
+
+/* -------------------------------------------------------------------------- */
+/* Broadcaster                                                                */
+/* -------------------------------------------------------------------------- */
 
 function BroadcasterPage() {
   const previewRef = useRef(null)
@@ -170,16 +179,14 @@ function BroadcasterPage() {
   const [error, setError] = useState('')
   const [cameras, setCameras] = useState([])
   const [selectedCameraId, setSelectedCameraId] = useState('')
-  const [wakeLockEnabled, setWakeLockEnabled] = useState(false)
   const [resolution, setResolution] = useState('')
   const [viewerCount, setViewerCount] = useState(0)
-  const [copyState, setCopyState] = useState('idle')
+  const [copied, setCopied] = useState(false)
   const [streamTitle, setStreamTitle] = useState('')
   const [adminTalking, setAdminTalking] = useState(false)
+  const [viewerTalking, setViewerTalking] = useState(false)
 
-  useEffect(() => {
-    statusRef.current = status
-  }, [status])
+  useEffect(() => { statusRef.current = status }, [status])
 
   const shareUrl = useMemo(() => {
     if (!roomId) return ''
@@ -188,26 +195,20 @@ function BroadcasterPage() {
 
   const refreshCameras = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return
-
     const devices = await navigator.mediaDevices.enumerateDevices()
     const cameraDevices = devices
-      .filter((device) => device.kind === 'videoinput')
+      .filter((d) => d.kind === 'videoinput')
       .map((device, index) => {
         const { isUsb, isBuiltIn } = classifyCamera(device, devices)
         return {
           deviceId: device.deviceId,
           label: device.label || `Camera ${index + 1}`,
-          isUsb,
-          isBuiltIn,
+          isUsb, isBuiltIn,
         }
       })
-
     setCameras(cameraDevices)
-
     setSelectedCameraId((current) => {
-      if (current && cameraDevices.some((c) => c.deviceId === current)) {
-        return current
-      }
+      if (current && cameraDevices.some((c) => c.deviceId === current)) return current
       const usb = cameraDevices.find((c) => c.isUsb)
       return usb?.deviceId || cameraDevices[0]?.deviceId || ''
     })
@@ -218,9 +219,7 @@ function BroadcasterPage() {
     try {
       const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
       probe.getTracks().forEach((t) => t.stop())
-    } catch {
-      // permission denied; still try to enumerate
-    }
+    } catch { /* noop */ }
     await refreshCameras()
   }, [refreshCameras])
 
@@ -228,7 +227,6 @@ function BroadcasterPage() {
     if (!wakeLockRef.current) return
     await wakeLockRef.current.release().catch(() => {})
     wakeLockRef.current = null
-    setWakeLockEnabled(false)
   }, [])
 
   const requestWakeLock = useCallback(async () => {
@@ -236,14 +234,8 @@ function BroadcasterPage() {
     try {
       const wakeLock = await navigator.wakeLock.request('screen')
       wakeLockRef.current = wakeLock
-      setWakeLockEnabled(true)
-      wakeLock.addEventListener('release', () => {
-        wakeLockRef.current = null
-        setWakeLockEnabled(false)
-      })
-    } catch {
-      setWakeLockEnabled(false)
-    }
+      wakeLock.addEventListener('release', () => { wakeLockRef.current = null })
+    } catch { /* noop */ }
   }, [])
 
   const sendPresence = useCallback(() => {
@@ -257,9 +249,7 @@ function BroadcasterPage() {
         startedAt: presenceStateRef.current.startedAt,
         viewerCount: activeCallsRef.current.size,
       })
-    } catch {
-      // ignore
-    }
+    } catch { /* noop */ }
   }, [])
 
   const closeAdminPresence = useCallback(() => {
@@ -278,7 +268,6 @@ function BroadcasterPage() {
       clearTimeout(adminRetryRef.current)
       adminRetryRef.current = null
     }
-
     const peer = peerRef.current
     const retryLater = () => {
       adminRetryRef.current = setTimeout(
@@ -286,12 +275,10 @@ function BroadcasterPage() {
         ADMIN_RETRY_MS
       )
     }
-
     if (!peer || peer.destroyed || peer.disconnected) {
       retryLater()
       return
     }
-
     closeAdminPresence()
 
     let conn
@@ -317,7 +304,6 @@ function BroadcasterPage() {
     conn.on('data', (data) => {
       if (!data || typeof data !== 'object') return
       if (data.type === 'admin-refresh') {
-        // Persist current session so we auto-resume after reload.
         const session = presenceStateRef.current
         if (session.roomId) {
           writeResumeSession({
@@ -327,7 +313,6 @@ function BroadcasterPage() {
             savedAt: Date.now(),
           })
         }
-        // Give the message a tick to flush, then reload the page.
         setTimeout(() => window.location.reload(), 200)
       }
     })
@@ -341,7 +326,6 @@ function BroadcasterPage() {
 
   const startBroadcast = useCallback(async (override = {}) => {
     if (statusRef.current === 'starting' || statusRef.current === 'live') return
-
     setError('')
     setStatus('starting')
 
@@ -352,7 +336,6 @@ function BroadcasterPage() {
     try {
       const localStream = await acquireStream(desiredCameraId)
       streamRef.current = localStream
-
       await refreshCameras()
 
       const videoTrack = localStream.getVideoTracks()[0]
@@ -362,10 +345,7 @@ function BroadcasterPage() {
         const fps = Math.round(settings.frameRate || 0)
         setResolution(`${settings.width}×${settings.height}${fps ? ` @ ${fps}fps` : ''}`)
       }
-
-      if (previewRef.current) {
-        previewRef.current.srcObject = localStream
-      }
+      if (previewRef.current) previewRef.current.srcObject = localStream
 
       presenceStateRef.current = {
         roomId: desiredRoomId,
@@ -374,7 +354,6 @@ function BroadcasterPage() {
       }
       if (desiredTitle !== streamTitle) setStreamTitle(desiredTitle)
 
-      // Persist session so a remote-triggered refresh can auto-resume.
       writeResumeSession({
         roomId: desiredRoomId,
         title: desiredTitle,
@@ -424,60 +403,49 @@ function BroadcasterPage() {
           })
         })
 
-        // Admin push-to-talk: admin calls broadcaster with their mic stream.
+        // Inbound audio-only calls: admin or viewer push-to-talk.
         peer.on('call', (incomingCall) => {
-          if (incomingCall.metadata?.kind !== 'admin-ptt') {
+          const kind = incomingCall.metadata?.kind
+          if (kind !== 'admin-ptt' && kind !== 'viewer-ptt') {
             try { incomingCall.close() } catch { /* noop */ }
             return
           }
-          incomingCall.answer() // we don't send media back
+          incomingCall.answer()
           incomingCall.on('stream', (remoteStream) => {
             const el = adminAudioRef.current
             if (!el) return
             el.srcObject = remoteStream
             el.muted = false
             el.play().catch(() => {})
-            setAdminTalking(true)
+            if (kind === 'admin-ptt') setAdminTalking(true)
+            else setViewerTalking(true)
           })
-          const stopTalking = () => {
+          const stop = () => {
             const el = adminAudioRef.current
             if (el) el.srcObject = null
-            setAdminTalking(false)
+            if (kind === 'admin-ptt') setAdminTalking(false)
+            else setViewerTalking(false)
           }
-          incomingCall.on('close', stopTalking)
-          incomingCall.on('error', stopTalking)
+          incomingCall.on('close', stop)
+          incomingCall.on('error', stop)
         })
 
         peer.on('disconnected', () => {
-          try { peer.reconnect() } catch { /* peer destroyed */ }
+          try { peer.reconnect() } catch { /* noop */ }
         })
 
         peer.on('error', (peerError) => {
-          // After a refresh, the PeerJS broker may still hold the previous
-          // ID for a few seconds. Retry a few times before failing.
           if (peerError?.type === 'unavailable-id' && attempt < 6) {
             try { peer.destroy() } catch { /* noop */ }
             setTimeout(() => createPeer(attempt + 1), 2000)
             return
           }
-
-          // Non-fatal errors — keep the stream alive.
-          // `peer-unavailable` fires when our outbound connect to the admin
-          // presence peer fails because no admin dashboard is open yet.
-          // `network`/`server-error`/`disconnected` are signaling blips that
-          // PeerJS handles via its own reconnect.
           const nonFatal = new Set([
-            'peer-unavailable',
-            'network',
-            'server-error',
-            'disconnected',
-            'socket-error',
-            'socket-closed',
+            'peer-unavailable', 'network', 'server-error',
+            'disconnected', 'socket-error', 'socket-closed',
           ])
           if (nonFatal.has(peerError?.type)) {
             if (peerError?.type === 'peer-unavailable') {
-              // Admin dashboard isn't up yet — schedule another presence
-              // attempt so we appear once they open it.
               closeAdminPresence()
               if (adminRetryRef.current) clearTimeout(adminRetryRef.current)
               adminRetryRef.current = setTimeout(
@@ -489,7 +457,6 @@ function BroadcasterPage() {
             }
             return
           }
-
           setError(peerError?.message || 'Failed to start broadcast')
           setStatus('idle')
         })
@@ -501,61 +468,47 @@ function BroadcasterPage() {
       setStatus('idle')
     }
   }, [
-    streamTitle,
-    selectedCameraId,
-    refreshCameras,
-    requestWakeLock,
-    connectAdminPresence,
-    closeAdminPresence,
-    sendPresence,
+    streamTitle, selectedCameraId, refreshCameras,
+    requestWakeLock, connectAdminPresence, closeAdminPresence, sendPresence,
   ])
 
-  useEffect(() => {
-    startBroadcastRef.current = startBroadcast
-  }, [startBroadcast])
+  useEffect(() => { startBroadcastRef.current = startBroadcast }, [startBroadcast])
 
   const stopBroadcast = () => {
-    // Tell viewers cleanly that the stream ended, then admin, then tear down.
     viewerConnsRef.current.forEach((conn) => {
       if (conn.open) {
         try { conn.send({ type: 'bye', reason: 'broadcaster-stopped' }) } catch { /* noop */ }
       }
     })
-
     if (adminConnRef.current?.open) {
       try {
         adminConnRef.current.send({
-          type: 'bye',
-          roomId: presenceStateRef.current.roomId,
+          type: 'bye', roomId: presenceStateRef.current.roomId,
         })
       } catch { /* noop */ }
     }
-
     if (adminRetryRef.current) {
       clearTimeout(adminRetryRef.current)
       adminRetryRef.current = null
     }
     closeAdminPresence()
-
     setTimeout(() => {
       if (peerRef.current) {
         peerRef.current.destroy()
         peerRef.current = null
       }
     }, 250)
-
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
     }
-    if (previewRef.current) {
-      previewRef.current.srcObject = null
-    }
+    if (previewRef.current) previewRef.current.srcObject = null
     activeCallsRef.current.clear()
     viewerConnsRef.current.clear()
     presenceStateRef.current = { roomId: '', title: '', startedAt: 0 }
     clearResumeSession()
     setAdminTalking(false)
+    setViewerTalking(false)
     setViewerCount(0)
     releaseWakeLock()
     setRoomId('')
@@ -568,23 +521,16 @@ function BroadcasterPage() {
     if (!shareUrl) return
     try {
       await navigator.clipboard.writeText(shareUrl)
-      setCopyState('copied')
-    } catch {
-      setCopyState('failed')
-    }
-    setTimeout(() => setCopyState('idle'), 1500)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* noop */ }
   }
 
   useEffect(() => {
-    const initialRefresh = window.setTimeout(() => {
-      void refreshCameras()
-    }, 0)
-
-    // Auto-resume after a remote admin-triggered refresh.
+    const initialRefresh = window.setTimeout(() => { void refreshCameras() }, 0)
     const resume = readResumeSession()
     if (resume && resume.roomId && !autoResumeAttemptedRef.current) {
       autoResumeAttemptedRef.current = true
-      // Wait briefly for camera permission state and devices to settle.
       window.setTimeout(() => {
         startBroadcastRef.current({
           roomId: resume.roomId,
@@ -593,10 +539,7 @@ function BroadcasterPage() {
         })
       }, 600)
     }
-
-    const onDeviceChange = () => {
-      void refreshCameras()
-    }
+    const onDeviceChange = () => { void refreshCameras() }
     navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange)
 
     const onVisibilityChange = () => {
@@ -610,173 +553,307 @@ function BroadcasterPage() {
       clearTimeout(initialRefresh)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
-
       if (adminRetryRef.current) {
         clearTimeout(adminRetryRef.current)
         adminRetryRef.current = null
       }
       closeAdminPresence()
-
-      if (peerRef.current) {
-        peerRef.current.destroy()
-        peerRef.current = null
-      }
+      if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null }
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop())
+        streamRef.current.getTracks().forEach((t) => t.stop())
         streamRef.current = null
       }
       releaseWakeLock()
     }
   }, [refreshCameras, releaseWakeLock, requestWakeLock, closeAdminPresence])
 
-  const hasRealLabels = cameras.some(
-    (c) => c.label && !/^Camera \d+$/.test(c.label)
-  )
+  const isLive = status === 'live'
+  const isStarting = status === 'starting'
 
   return (
-    <section className="card">
-      <h1>Start A Live Camera + Mic Stream</h1>
-      <p className="subtext">
-        Go live from this page and share one URL. Anyone opening that URL can
-        watch video and hear your microphone audio.
-      </p>
-
-      <div className="cameraControls">
-        <label htmlFor="titleInput">Stream Name (optional)</label>
-        <input
-          id="titleInput"
-          type="text"
-          className="textInput"
-          placeholder="e.g. Front door camera"
-          value={streamTitle}
-          onChange={(event) => setStreamTitle(event.target.value)}
-          disabled={status === 'live' || status === 'starting'}
-          maxLength={60}
-        />
-      </div>
-
-      <div className="cameraControls">
-        <label htmlFor="cameraSelect">Camera Source</label>
-        <div className="cameraRow">
-          <select
-            id="cameraSelect"
-            value={selectedCameraId}
-            onChange={(event) => setSelectedCameraId(event.target.value)}
-            disabled={status === 'starting' || status === 'live' || cameras.length === 0}
-          >
-            {cameras.length === 0 && <option value="">No camera detected</option>}
-            {cameras.map((camera) => (
-              <option key={camera.deviceId} value={camera.deviceId}>
-                {camera.label}
-                {camera.isUsb ? ' • USB' : camera.isBuiltIn ? ' • Built-in' : ''}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="secondary detectBtn" onClick={unlockLabels}>
-            Detect Cameras
-          </button>
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <Radio size={18} strokeWidth={2.2} />
+          <span>HAWK</span>
         </div>
-        <p className="cameraHint">
-          {cameras.length === 0
-            ? 'No camera detected. On Raspberry Pi, plug in the USB webcam, then click Detect Cameras.'
-            : hasRealLabels
-            ? 'USB cams (including Raspberry Pi/Linux UVC devices) are auto-labeled.'
-            : 'Click Detect Cameras and approve permission to reveal device names.'}
-        </p>
-      </div>
+        <div className="topbar-status">
+          {isLive ? (
+            <span className="badge badge-live">
+              <span className="dot" /> LIVE
+            </span>
+          ) : (
+            <span className="badge badge-idle">
+              <span className="dot dot-idle" /> OFFLINE
+            </span>
+          )}
+          {isLive && (
+            <>
+              <span className="badge badge-soft">
+                <Eye size={14} /> {viewerCount}
+              </span>
+              {resolution && (
+                <span className="badge badge-soft">{resolution}</span>
+              )}
+            </>
+          )}
+        </div>
+        <div className="topbar-actions">
+          <Link to="/admin" className="iconLink" title="Admin dashboard">
+            <ShieldCheck size={18} />
+            <span>Admin</span>
+          </Link>
+        </div>
+      </header>
 
-      <video ref={previewRef} autoPlay playsInline muted className="video" />
-      <audio ref={adminAudioRef} autoPlay playsInline />
+      <main className="broadcaster">
+        <section className="stagePane">
+          <div className="stage">
+            {streamRef.current ? null : (
+              <div className="stageEmpty">
+                {isStarting ? (
+                  <>
+                    <Loader2 className="spin" size={42} />
+                    <p>Starting camera…</p>
+                  </>
+                ) : (
+                  <>
+                    <VideoOff size={42} />
+                    <p>Camera preview will appear here</p>
+                  </>
+                )}
+              </div>
+            )}
+            <video
+              ref={previewRef}
+              autoPlay playsInline muted
+              className={`stageVideo ${isLive || isStarting ? 'visible' : ''}`}
+            />
+            <audio ref={adminAudioRef} autoPlay playsInline />
 
-      {adminTalking && (
-        <p className="adminTalkingBanner">🔊 Admin is talking to you</p>
-      )}
-
-      <div className="actions">
-        <button
-          type="button"
-          onClick={() => startBroadcast()}
-          disabled={status === 'starting' || status === 'live'}
-        >
-          {status === 'starting' ? 'Starting...' : 'Go Live'}
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          onClick={stopBroadcast}
-          disabled={status !== 'live' && status !== 'starting'}
-        >
-          Stop
-        </button>
-      </div>
-
-      {shareUrl && (
-        <div className="shareBox">
-          <p className="status">
-            Live now • {viewerCount} {viewerCount === 1 ? 'viewer' : 'viewers'}
-            {resolution ? ` • ${resolution}` : ''}
-          </p>
-          <div className="shareRow">
-            <a href={shareUrl} target="_blank" rel="noreferrer" className="shareLink">
-              {shareUrl}
-            </a>
-            <button type="button" className="copyBtn" onClick={copyShareUrl}>
-              {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
-            </button>
+            {(adminTalking || viewerTalking) && (
+              <div className="talkBanner">
+                <Volume2 size={16} />
+                <span>{adminTalking ? 'Admin' : 'Viewer'} is talking to you</span>
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        </section>
 
-      {error && <p className="error">{error}</p>}
+        <aside className="sidePane">
+          <div className="panel">
+            <h2 className="panelHeading">
+              <Video size={16} /> Stream
+            </h2>
 
-      {status === 'live' && (
-        <p className="status subtle">
-          Device awake mode: {wakeLockEnabled ? 'On' : 'Not available in this browser'}
-        </p>
-      )}
-    </section>
+            <label className="field">
+              <span className="fieldLabel">Name (optional)</span>
+              <input
+                type="text"
+                className="input"
+                placeholder="Front door camera"
+                value={streamTitle}
+                onChange={(e) => setStreamTitle(e.target.value)}
+                disabled={isLive || isStarting}
+                maxLength={60}
+              />
+            </label>
+
+            <label className="field">
+              <span className="fieldLabel">Camera</span>
+              <div className="row">
+                <select
+                  className="input"
+                  value={selectedCameraId}
+                  onChange={(e) => setSelectedCameraId(e.target.value)}
+                  disabled={isLive || isStarting || cameras.length === 0}
+                >
+                  {cameras.length === 0 && <option value="">No camera detected</option>}
+                  {cameras.map((c) => (
+                    <option key={c.deviceId} value={c.deviceId}>
+                      {c.label}{c.isUsb ? ' — USB' : c.isBuiltIn ? ' — Built-in' : ''}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="iconBtn"
+                  onClick={unlockLabels}
+                  title="Detect cameras"
+                  aria-label="Detect cameras"
+                >
+                  <RefreshCw size={16} />
+                </button>
+              </div>
+              {cameras.length === 0 && (
+                <p className="hint">On Raspberry Pi, plug in the USB webcam then refresh.</p>
+              )}
+            </label>
+
+            <div className="actionRow">
+              {!isLive ? (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-block"
+                  onClick={() => startBroadcast()}
+                  disabled={isStarting}
+                >
+                  {isStarting ? <Loader2 size={18} className="spin" /> : <Play size={18} />}
+                  <span>{isStarting ? 'Starting' : 'Go Live'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-danger btn-block"
+                  onClick={stopBroadcast}
+                >
+                  <Square size={16} />
+                  <span>Stop Stream</span>
+                </button>
+              )}
+            </div>
+
+            {error && (
+              <p className="alert">
+                <AlertTriangle size={14} /> {error}
+              </p>
+            )}
+          </div>
+
+          {shareUrl && (
+            <div className="panel">
+              <h2 className="panelHeading">
+                <ExternalLink size={16} /> Share
+              </h2>
+              <div className="shareLine">
+                <a href={shareUrl} target="_blank" rel="noreferrer" className="shareUrl">
+                  {shareUrl}
+                </a>
+                <button
+                  type="button"
+                  className="iconBtn"
+                  onClick={copyShareUrl}
+                  title={copied ? 'Copied' : 'Copy link'}
+                  aria-label="Copy link"
+                >
+                  {copied ? <Check size={16} /> : <Copy size={16} />}
+                </button>
+              </div>
+            </div>
+          )}
+        </aside>
+      </main>
+    </div>
   )
 }
 
+/* -------------------------------------------------------------------------- */
+/* Viewer                                                                     */
+/* -------------------------------------------------------------------------- */
+
 function ViewerPage() {
   const { roomId = '' } = useParams()
+  const containerRef = useRef(null)
   const videoRef = useRef(null)
   const reconnectTimerRef = useRef(null)
   const streamTimerRef = useRef(null)
   const attemptRef = useRef(0)
+  const peerRef = useRef(null)
+  const pttCallRef = useRef(null)
+  const pttStreamRef = useRef(null)
   const [status, setStatus] = useState('connecting')
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [pttSpeaking, setPttSpeaking] = useState(false)
+  const [pttError, setPttError] = useState('')
 
   useEffect(() => {
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
-    document.addEventListener('fullscreenchange', onFsChange)
-    document.addEventListener('webkitfullscreenchange', onFsChange)
+    const onFs = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFs)
+    document.addEventListener('webkitfullscreenchange', onFs)
     return () => {
-      document.removeEventListener('fullscreenchange', onFsChange)
-      document.removeEventListener('webkitfullscreenchange', onFsChange)
+      document.removeEventListener('fullscreenchange', onFs)
+      document.removeEventListener('webkitfullscreenchange', onFs)
     }
   }, [])
 
   const toggleFullscreen = async () => {
-    const el = videoRef.current
-    if (!el) return
     try {
       if (document.fullscreenElement) {
         await document.exitFullscreen()
-      } else if (el.requestFullscreen) {
-        await el.requestFullscreen()
-      } else if (el.webkitEnterFullscreen) {
-        // iOS Safari: video element only
-        el.webkitEnterFullscreen()
+      } else {
+        const el = containerRef.current || videoRef.current
+        if (el?.requestFullscreen) await el.requestFullscreen()
+        else if (videoRef.current?.webkitEnterFullscreen) videoRef.current.webkitEnterFullscreen()
       }
-    } catch {
-      // ignore — user denied or unsupported
-    }
+    } catch { /* noop */ }
   }
 
+  const endPtt = useCallback(() => {
+    if (pttStreamRef.current) {
+      pttStreamRef.current.getTracks().forEach((t) => t.stop())
+      pttStreamRef.current = null
+    }
+    if (pttCallRef.current) {
+      try { pttCallRef.current.close() } catch { /* noop */ }
+      pttCallRef.current = null
+    }
+    setPttSpeaking(false)
+  }, [])
+
+  const startPtt = useCallback(async () => {
+    setPttError('')
+    const peer = peerRef.current
+    if (!peer || peer.destroyed) {
+      setPttError('Not connected to the broadcaster yet.')
+      return false
+    }
+    if (pttCallRef.current) return true
+
+    let mic
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+        },
+        video: false,
+      })
+    } catch {
+      setPttError('Microphone permission is required to talk.')
+      return false
+    }
+    mic.getAudioTracks().forEach((t) => { t.enabled = false })
+    const call = peer.call(roomId, mic, { metadata: { kind: 'viewer-ptt' } })
+    if (!call) {
+      mic.getTracks().forEach((t) => t.stop())
+      setPttError('Could not open mic channel.')
+      return false
+    }
+    pttStreamRef.current = mic
+    pttCallRef.current = call
+    const stop = () => {
+      if (pttCallRef.current === call) endPtt()
+    }
+    call.on('close', stop)
+    call.on('error', stop)
+    return true
+  }, [roomId, endPtt])
+
+  const setTalking = useCallback((on) => {
+    const s = pttStreamRef.current
+    if (!s) return
+    s.getAudioTracks().forEach((t) => { t.enabled = on })
+    setPttSpeaking(on)
+  }, [])
+
+  const handlePttDown = useCallback(async () => {
+    const ok = pttCallRef.current ? true : await startPtt()
+    if (ok) setTalking(true)
+  }, [startPtt, setTalking])
+
+  const handlePttUp = useCallback(() => { setTalking(false) }, [setTalking])
+
   useEffect(() => {
-    let activePeer = null
     let activeConn = null
     let activeCall = null
     let gotStream = false
@@ -784,153 +861,105 @@ function ViewerPage() {
     let ended = false
 
     const clearTimers = () => {
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current)
-        reconnectTimerRef.current = null
-      }
-      if (streamTimerRef.current) {
-        clearTimeout(streamTimerRef.current)
-        streamTimerRef.current = null
-      }
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+      if (streamTimerRef.current) { clearTimeout(streamTimerRef.current); streamTimerRef.current = null }
     }
 
-    const stopMediaPlayback = () => {
+    const stopMedia = () => {
       if (!videoRef.current?.srcObject) return
-      const stream = videoRef.current.srcObject
-      stream.getTracks().forEach((track) => track.stop())
+      const s = videoRef.current.srcObject
+      s.getTracks().forEach((t) => t.stop())
       videoRef.current.srcObject = null
     }
 
-    const cleanupPeerOnly = () => {
-      if (activeCall) {
-        activeCall.close()
-        activeCall = null
-      }
-      if (activeConn) {
-        activeConn.close()
-        activeConn = null
-      }
-      if (activePeer) {
-        activePeer.destroy()
-        activePeer = null
-      }
+    const cleanupPeer = () => {
+      if (activeCall) { activeCall.close(); activeCall = null }
+      if (activeConn) { activeConn.close(); activeConn = null }
+      if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null }
     }
 
     const markEnded = () => {
       ended = true
       cancelled = true
       clearTimers()
-      cleanupPeerOnly()
-      stopMediaPlayback()
+      endPtt()
+      cleanupPeer()
+      stopMedia()
       setStatus('ended')
       setError('')
     }
 
     const scheduleReconnect = (message) => {
       if (cancelled || ended) return
-
       clearTimers()
-      cleanupPeerOnly()
-
+      endPtt()
+      cleanupPeer()
       if (!navigator.onLine) {
         setStatus('offline')
         setError('Network is offline. Waiting for connection...')
         return
       }
-
       attemptRef.current += 1
       const delayMs = Math.min(15000, 1000 * 2 ** Math.min(attemptRef.current - 1, 4))
       setStatus('reconnecting')
       setError(message)
-
-      reconnectTimerRef.current = window.setTimeout(() => {
-        connect()
-      }, delayMs)
+      reconnectTimerRef.current = window.setTimeout(connect, delayMs)
     }
 
     const connect = () => {
       if (cancelled || ended) return
-
       clearTimers()
-      cleanupPeerOnly()
+      endPtt()
+      cleanupPeer()
       gotStream = false
-
       if (!navigator.onLine) {
         setStatus('offline')
         setError('Network is offline. Waiting for connection...')
         return
       }
-
       setStatus(attemptRef.current === 0 ? 'connecting' : 'reconnecting')
       setError('')
 
       const peer = new Peer({ debug: 0 })
-      activePeer = peer
+      peerRef.current = peer
 
       peer.on('open', () => {
         if (cancelled || ended) return
-
         const conn = peer.connect(roomId, { reliable: true })
         activeConn = conn
 
-        conn.on('open', () => {
-          if (!cancelled && !ended) setStatus('waiting')
-        })
-
+        conn.on('open', () => { if (!cancelled && !ended) setStatus('waiting') })
         conn.on('data', (data) => {
-          if (data && typeof data === 'object' && data.type === 'bye') {
-            markEnded()
-          }
+          if (data && typeof data === 'object' && data.type === 'bye') markEnded()
         })
-
         conn.on('close', () => {
-          if (!gotStream) {
-            scheduleReconnect('Broadcaster not reachable. Retrying...')
-          }
+          if (!gotStream) scheduleReconnect('Broadcaster not reachable. Retrying...')
         })
-
-        conn.on('error', () => {
-          scheduleReconnect('Could not connect to this stream URL. Retrying...')
-        })
+        conn.on('error', () => scheduleReconnect('Could not connect. Retrying...'))
       })
 
       peer.on('call', (call) => {
         activeCall = call
         call.answer()
-
-        call.on('stream', (remoteStream) => {
+        call.on('stream', (remote) => {
           gotStream = true
           attemptRef.current = 0
           clearTimers()
           setError('')
           if (videoRef.current) {
-            videoRef.current.srcObject = remoteStream
+            videoRef.current.srcObject = remote
             videoRef.current.play().catch(() => {})
             setStatus('live')
           }
         })
-
-        call.on('close', () => {
-          scheduleReconnect('Stream disconnected. Reconnecting...')
-        })
-
-        call.on('error', () => {
-          scheduleReconnect('Stream interrupted. Reconnecting...')
-        })
+        call.on('close', () => scheduleReconnect('Stream disconnected. Reconnecting...'))
+        call.on('error', () => scheduleReconnect('Stream interrupted. Reconnecting...'))
       })
 
-      peer.on('disconnected', () => {
-        scheduleReconnect('Connection lost. Reconnecting...')
-      })
-
-      peer.on('close', () => {
-        if (!cancelled && !ended) scheduleReconnect('Peer closed. Reconnecting...')
-      })
-
+      peer.on('disconnected', () => scheduleReconnect('Connection lost. Reconnecting...'))
+      peer.on('close', () => { if (!cancelled && !ended) scheduleReconnect('Peer closed. Reconnecting...') })
       peer.on('error', (peerError) => {
         if (peerError.type === 'peer-unavailable') {
-          // Broadcaster may be refreshing (admin-triggered or otherwise).
-          // Keep retrying — only an explicit "bye" message ends the stream.
           scheduleReconnect('Broadcaster not live yet. Retrying...')
           return
         }
@@ -949,18 +978,17 @@ function ViewerPage() {
       attemptRef.current = 0
       connect()
     }
-
     const onOffline = () => {
       if (ended) return
       clearTimers()
-      cleanupPeerOnly()
+      endPtt()
+      cleanupPeer()
       setStatus('offline')
       setError('Network is offline. Waiting for connection...')
     }
 
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
-
     connect()
 
     return () => {
@@ -968,68 +996,120 @@ function ViewerPage() {
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
       clearTimers()
-      cleanupPeerOnly()
-      stopMediaPlayback()
+      endPtt()
+      cleanupPeer()
+      stopMedia()
     }
-  }, [roomId])
+  }, [roomId, endPtt])
+
+  const statusIcon = () => {
+    if (status === 'live') return <span className="dot" />
+    if (status === 'offline') return <WifiOff size={14} />
+    if (status === 'reconnecting' || status === 'connecting' || status === 'waiting')
+      return <Loader2 size={14} className="spin" />
+    if (status === 'ended') return <AlertTriangle size={14} />
+    return <Wifi size={14} />
+  }
+
+  const statusText = () => {
+    switch (status) {
+      case 'connecting': return 'Connecting'
+      case 'waiting': return 'Waiting for video'
+      case 'live': return 'Live'
+      case 'reconnecting': return 'Reconnecting'
+      case 'offline': return 'Offline'
+      case 'ended': return 'Stream ended'
+      default: return ''
+    }
+  }
 
   return (
-    <main className="page">
-      <section className="card viewerCard">
-        <h1>Watching Stream: {roomId}</h1>
-        <p className="subtext">
-          If audio does not auto-play in your browser, click inside the video to
-          start playback.
-        </p>
-
-        <video ref={videoRef} autoPlay playsInline controls className="video" />
-
-        {status === 'ended' ? (
-          <div className="endedBanner">
-            <p className="endedTitle">Stream has ended</p>
-            <p className="endedBody">
-              The broadcaster has stopped this stream. Refresh this page if it
-              comes back online.
-            </p>
-          </div>
-        ) : (
-          <p className="status">
-            {status === 'connecting' && 'Connecting...'}
-            {status === 'waiting' && 'Connected. Waiting for broadcaster video...'}
-            {status === 'live' && 'Live stream active'}
-            {status === 'reconnecting' && 'Reconnecting...'}
-            {status === 'offline' && 'Offline. Waiting for internet...'}
-            {status === 'error' && 'Connection error'}
-          </p>
-        )}
-
-        {error && status !== 'ended' && <p className="error">{error}</p>}
-
-        <div className="viewerActions">
-          <button type="button" onClick={toggleFullscreen}>
-            {isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+    <div className="app viewerApp" ref={containerRef}>
+      <header className="topbar">
+        <Link to="/" className="iconLink" title="Back">
+          <ArrowLeft size={18} />
+          <span>Hawk</span>
+        </Link>
+        <div className="topbar-status">
+          <span className={`badge ${status === 'live' ? 'badge-live' : status === 'ended' ? 'badge-danger' : 'badge-soft'}`}>
+            {statusIcon()} {statusText()}
+          </span>
+          <span className="badge badge-soft mono">{roomId}</span>
+        </div>
+        <div className="topbar-actions">
+          <button
+            type="button"
+            className="iconLink iconLink-btn"
+            onClick={toggleFullscreen}
+            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          >
+            {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
           </button>
         </div>
-      </section>
-    </main>
+      </header>
+
+      <div className="viewerStage">
+        <video
+          ref={videoRef}
+          autoPlay playsInline controls
+          className="viewerVideo"
+        />
+
+        {status === 'ended' && (
+          <div className="overlay">
+            <div className="overlayCard">
+              <AlertTriangle size={28} />
+              <h2>Stream has ended</h2>
+              <p>The broadcaster has stopped this stream.</p>
+            </div>
+          </div>
+        )}
+
+        {(status === 'connecting' || status === 'waiting' || status === 'reconnecting' || status === 'offline') && (
+          <div className="overlay overlay-light">
+            <div className="overlayCard">
+              {status === 'offline' ? <WifiOff size={28} /> : <Loader2 size={28} className="spin" />}
+              <h2>{statusText()}</h2>
+              {error && <p>{error}</p>}
+            </div>
+          </div>
+        )}
+
+        {status === 'live' && (
+          <div className="viewerControls">
+            {pttError && (
+              <div className="toast">
+                <AlertTriangle size={14} /> {pttError}
+              </div>
+            )}
+            <button
+              type="button"
+              className={`pttButton ${pttSpeaking ? 'speaking' : ''}`}
+              onPointerDown={(e) => { e.preventDefault(); handlePttDown() }}
+              onPointerUp={handlePttUp}
+              onPointerLeave={handlePttUp}
+              onPointerCancel={handlePttUp}
+              title="Hold to talk"
+              aria-label="Push to talk"
+            >
+              {pttSpeaking ? <Mic size={22} /> : <MicOff size={22} />}
+              <span>{pttSpeaking ? 'Talking' : 'Hold to Talk'}</span>
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
-function formatDuration(ms) {
-  if (!ms || ms < 0) return '0s'
-  const totalSec = Math.floor(ms / 1000)
-  const h = Math.floor(totalSec / 3600)
-  const m = Math.floor((totalSec % 3600) / 60)
-  const s = totalSec % 60
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
-}
+/* -------------------------------------------------------------------------- */
+/* Admin                                                                      */
+/* -------------------------------------------------------------------------- */
 
 function AdminDashboard({ onSignOut }) {
   const peerRef = useRef(null)
   const streamsRef = useRef(new Map())
-  const connsRef = useRef(new Map()) // roomId -> DataConnection (broadcaster presence)
+  const connsRef = useRef(new Map())
   const sweeperRef = useRef(null)
   const pttRef = useRef({ peerId: null, call: null, stream: null })
   const [streams, setStreams] = useState([])
@@ -1045,13 +1125,9 @@ function AdminDashboard({ onSignOut }) {
   }, [])
 
   const endPttSession = useCallback(() => {
-    const session = pttRef.current
-    if (session.stream) {
-      session.stream.getTracks().forEach((t) => t.stop())
-    }
-    if (session.call) {
-      try { session.call.close() } catch { /* noop */ }
-    }
+    const s = pttRef.current
+    if (s.stream) s.stream.getTracks().forEach((t) => t.stop())
+    if (s.call) { try { s.call.close() } catch { /* noop */ } }
     pttRef.current = { peerId: null, call: null, stream: null }
     setPttActiveRoom('')
     setPttSpeaking(false)
@@ -1060,7 +1136,7 @@ function AdminDashboard({ onSignOut }) {
   const setTalking = useCallback((on) => {
     const stream = pttRef.current.stream
     if (!stream) return
-    stream.getAudioTracks().forEach((track) => { track.enabled = on })
+    stream.getAudioTracks().forEach((t) => { t.enabled = on })
     setPttSpeaking(on)
   }, [])
 
@@ -1071,45 +1147,29 @@ function AdminDashboard({ onSignOut }) {
       setPttError('Admin signaling not ready.')
       return false
     }
+    if (pttRef.current.peerId && pttRef.current.peerId !== room.roomId) endPttSession()
+    if (pttRef.current.peerId === room.roomId && pttRef.current.call) return true
 
-    // If switching streams, tear down the previous session.
-    if (pttRef.current.peerId && pttRef.current.peerId !== room.roomId) {
-      endPttSession()
-    }
-    if (pttRef.current.peerId === room.roomId && pttRef.current.call) {
-      return true
-    }
-
-    let micStream
+    let mic
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+      mic = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
       })
     } catch {
       setPttError('Microphone permission is required for push-to-talk.')
       return false
     }
-
-    micStream.getAudioTracks().forEach((track) => { track.enabled = false })
-
-    const call = peer.call(room.roomId, micStream, { metadata: { kind: 'admin-ptt' } })
+    mic.getAudioTracks().forEach((t) => { t.enabled = false })
+    const call = peer.call(room.roomId, mic, { metadata: { kind: 'admin-ptt' } })
     if (!call) {
-      micStream.getTracks().forEach((t) => t.stop())
-      setPttError('Could not place admin call to this stream.')
+      mic.getTracks().forEach((t) => t.stop())
+      setPttError('Could not place admin call.')
       return false
     }
-
-    pttRef.current = { peerId: room.roomId, call, stream: micStream }
+    pttRef.current = { peerId: room.roomId, call, stream: mic }
     setPttActiveRoom(room.roomId)
-
-    const stop = () => {
-      if (pttRef.current.call === call) endPttSession()
-    }
+    const stop = () => { if (pttRef.current.call === call) endPttSession() }
     call.on('close', stop)
     call.on('error', stop)
     return true
@@ -1121,34 +1181,22 @@ function AdminDashboard({ onSignOut }) {
       setAdminError('Broadcaster channel not available for refresh.')
       return
     }
-    try {
-      conn.send({ type: 'admin-refresh' })
-    } catch {
-      setAdminError('Failed to send refresh command.')
-    }
+    try { conn.send({ type: 'admin-refresh' }) }
+    catch { setAdminError('Failed to send refresh command.') }
   }, [])
 
   const handlePttDown = useCallback(async (room) => {
-    const ok = pttRef.current.peerId === room.roomId
-      ? true
-      : await startPttSession(room)
+    const ok = pttRef.current.peerId === room.roomId ? true : await startPttSession(room)
     if (ok) setTalking(true)
   }, [startPttSession, setTalking])
 
-  const handlePttUp = useCallback(() => {
-    setTalking(false)
-  }, [setTalking])
+  const handlePttUp = useCallback(() => setTalking(false), [setTalking])
 
   useEffect(() => {
     const peer = new Peer(ADMIN_PEER_ID, { debug: 0 })
     peerRef.current = peer
-
-    peer.on('open', () => {
-      setAdminStatus('listening')
-    })
-
+    peer.on('open', () => setAdminStatus('listening'))
     peer.on('connection', (conn) => {
-      // Each broadcaster opens a presence conn; track liveness via heartbeats.
       let assignedRoom = ''
       conn.on('data', (data) => {
         if (!data || typeof data !== 'object') return
@@ -1170,7 +1218,6 @@ function AdminDashboard({ onSignOut }) {
           publish()
         }
       })
-
       conn.on('close', () => {
         let changed = false
         streamsRef.current.forEach((entry, key) => {
@@ -1184,27 +1231,21 @@ function AdminDashboard({ onSignOut }) {
         if (changed) publish()
       })
     })
-
     peer.on('error', (err) => {
       if (err?.type === 'unavailable-id') {
         setAdminStatus('conflict')
-        setAdminError(
-          'Another admin dashboard is already running for this app. Close it and reload.'
-        )
+        setAdminError('Another admin dashboard is already running. Close it and reload.')
         return
       }
       if (err?.type === 'network' || err?.type === 'server-error') {
         setAdminStatus('reconnecting')
-        setAdminError('Signaling connection issue. Will retry automatically.')
+        setAdminError('Signaling connection issue. Retrying...')
         return
       }
       setAdminStatus('error')
       setAdminError(err?.message || 'Admin connection failed.')
     })
-
-    peer.on('disconnected', () => {
-      try { peer.reconnect() } catch { /* noop */ }
-    })
+    peer.on('disconnected', () => { try { peer.reconnect() } catch { /* noop */ } })
 
     sweeperRef.current = setInterval(() => {
       const t = Date.now()
@@ -1223,133 +1264,127 @@ function AdminDashboard({ onSignOut }) {
     const streamsMap = streamsRef.current
     const connsMap = connsRef.current
     return () => {
-      if (sweeperRef.current) {
-        clearInterval(sweeperRef.current)
-        sweeperRef.current = null
-      }
+      if (sweeperRef.current) { clearInterval(sweeperRef.current); sweeperRef.current = null }
       endPttSession()
-      if (peerRef.current) {
-        peerRef.current.destroy()
-        peerRef.current = null
-      }
+      if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null }
       streamsMap.clear()
       connsMap.clear()
     }
   }, [publish, endPttSession])
 
   return (
-    <main className="page adminPage">
-      <section className="card adminCard">
-        <div className="adminHeader">
-          <div>
-            <h1>Admin Dashboard</h1>
-            <p className="status subtle">
-              {adminStatus === 'connecting' && 'Connecting to presence channel...'}
-              {adminStatus === 'listening' && `${streams.length} live stream${streams.length === 1 ? '' : 's'}`}
-              {adminStatus === 'reconnecting' && 'Reconnecting to signaling...'}
-              {adminStatus === 'conflict' && 'Dashboard conflict'}
-              {adminStatus === 'error' && 'Dashboard error'}
-            </p>
-          </div>
-          <button type="button" className="secondary" onClick={onSignOut}>
-            Sign out
+    <div className="app adminApp">
+      <header className="topbar">
+        <div className="brand">
+          <ShieldCheck size={18} strokeWidth={2.2} />
+          <span>HAWK Admin</span>
+        </div>
+        <div className="topbar-status">
+          <span className={`badge ${adminStatus === 'listening' ? 'badge-live' : adminStatus === 'conflict' || adminStatus === 'error' ? 'badge-danger' : 'badge-soft'}`}>
+            {adminStatus === 'listening'
+              ? <><span className="dot" /> {streams.length} live</>
+              : adminStatus === 'connecting'
+              ? <><Loader2 size={14} className="spin" /> Connecting</>
+              : adminStatus === 'reconnecting'
+              ? <><Loader2 size={14} className="spin" /> Reconnecting</>
+              : adminStatus === 'conflict'
+              ? <><AlertTriangle size={14} /> Conflict</>
+              : <><AlertTriangle size={14} /> Error</>}
+          </span>
+        </div>
+        <div className="topbar-actions">
+          <button type="button" className="iconLink iconLink-btn" onClick={onSignOut} title="Sign out">
+            <LogOut size={16} />
+            <span>Sign out</span>
           </button>
         </div>
+      </header>
 
-        {adminError && <p className="error">{adminError}</p>}
-        {pttError && <p className="error">{pttError}</p>}
-
-        {streams.length === 0 && adminStatus === 'listening' && (
-          <p className="emptyState">
-            No active streams right now. Streams will appear here the moment a
-            broadcaster goes live.
-          </p>
+      <main className="adminBody">
+        {(adminError || pttError) && (
+          <div className="alertBar">
+            <AlertTriangle size={14} />
+            <span>{adminError || pttError}</span>
+          </div>
         )}
 
-        <div className="streamGrid">
+        {streams.length === 0 && adminStatus === 'listening' && (
+          <div className="emptyState">
+            <Radio size={36} />
+            <h2>No active streams</h2>
+            <p>Streams appear here as soon as a broadcaster goes live.</p>
+          </div>
+        )}
+
+        <div className="grid">
           {streams.map((stream) => {
             const watchUrl = `/watch/${stream.roomId}`
             const isPttActive = pttActiveRoom === stream.roomId
             return (
-              <div key={stream.roomId} className="streamTile">
-                <a
-                  href={watchUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="streamThumbLink"
-                >
-                  <div className="streamThumb">
-                    <span className="liveBadge">
-                      <span className="liveDot" /> LIVE
-                    </span>
-                    <span className="viewerBadge">
-                      👁 {stream.viewerCount}
-                    </span>
+              <article key={stream.roomId} className="card-stream">
+                <a href={watchUrl} target="_blank" rel="noreferrer" className="thumbLink">
+                  <div className="thumb">
+                    <span className="liveBadge"><span className="dot" /> LIVE</span>
+                    <span className="thumbMeta"><Eye size={13} /> {stream.viewerCount}</span>
+                    <Camera className="thumbIcon" size={42} strokeWidth={1.4} />
                   </div>
                 </a>
-                <div className="streamMeta">
-                  <p className="streamTitle">
-                    {stream.title || `Stream ${stream.roomId}`}
+                <div className="card-streamBody">
+                  <div className="card-streamTitleRow">
+                    <h3 className="card-streamTitle">
+                      {stream.title || `Stream ${stream.roomId}`}
+                    </h3>
+                  </div>
+                  <p className="card-streamSub mono">
+                    {stream.roomId} · {formatDuration(now - stream.startedAt)}
                   </p>
-                  <p className="streamSub">
-                    {stream.roomId} • {formatDuration(now - stream.startedAt)}
-                  </p>
-                  <div className="streamActions">
-                    <a
-                      href={watchUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="tileBtn primary"
-                    >
-                      Open
+                  <div className="card-streamActions">
+                    <a href={watchUrl} target="_blank" rel="noreferrer" className="tileBtn tileBtn-primary" title="Open stream">
+                      <ExternalLink size={15} />
+                      <span>Open</span>
                     </a>
                     <button
                       type="button"
                       className="tileBtn"
                       onClick={() => handleRefresh(stream)}
-                      title="Reload the broadcaster page and auto-resume this stream"
+                      title="Refresh broadcaster"
                     >
-                      Refresh
+                      <RefreshCw size={15} />
+                      <span>Refresh</span>
                     </button>
                     <button
                       type="button"
-                      className={`tileBtn ptt ${isPttActive && pttSpeaking ? 'speaking' : ''}`}
-                      onPointerDown={(event) => {
-                        event.preventDefault()
-                        handlePttDown(stream)
-                      }}
+                      className={`tileBtn tileBtn-ptt ${isPttActive && pttSpeaking ? 'speaking' : ''}`}
+                      onPointerDown={(e) => { e.preventDefault(); handlePttDown(stream) }}
                       onPointerUp={handlePttUp}
                       onPointerLeave={handlePttUp}
                       onPointerCancel={handlePttUp}
-                      title="Hold to talk to this broadcaster"
+                      title="Hold to talk"
                     >
-                      {isPttActive && pttSpeaking ? '🎤 Talking' : '🎤 Hold to Talk'}
+                      {isPttActive && pttSpeaking ? <Mic size={15} /> : <MicOff size={15} />}
+                      <span>{isPttActive && pttSpeaking ? 'Talking' : 'Hold to Talk'}</span>
                     </button>
                   </div>
                 </div>
-              </div>
+              </article>
             )
           })}
         </div>
-      </section>
-    </main>
+      </main>
+    </div>
   )
 }
 
 function AdminPage() {
   const navigate = useNavigate()
   const [unlocked, setUnlocked] = useState(() => {
-    try {
-      return sessionStorage.getItem('hawk-admin-unlocked') === '1'
-    } catch {
-      return false
-    }
+    try { return sessionStorage.getItem('hawk-admin-unlocked') === '1' } catch { return false }
   })
   const [pin, setPin] = useState('')
   const [pinError, setPinError] = useState('')
 
-  const submitPin = (event) => {
-    event.preventDefault()
+  const submitPin = (e) => {
+    e.preventDefault()
     if (pin === ADMIN_PIN) {
       try { sessionStorage.setItem('hawk-admin-unlocked', '1') } catch { /* noop */ }
       setUnlocked(true)
@@ -1369,29 +1404,37 @@ function AdminPage() {
 
   if (!unlocked) {
     return (
-      <main className="page">
-        <section className="card pinCard">
-          <h1>Admin Access</h1>
-          <p className="subtext">Enter the admin PIN to continue.</p>
+      <div className="app pinApp">
+        <div className="pinCard">
+          <div className="pinIcon"><Lock size={22} /></div>
+          <h1>Admin access</h1>
+          <p className="pinSubtext">Enter the admin PIN to continue.</p>
           <form onSubmit={submitPin} className="pinForm">
             <input
               type="password"
               inputMode="numeric"
               autoComplete="off"
-              className="textInput"
+              className="input pinInput"
               placeholder="PIN"
               value={pin}
-              onChange={(event) => setPin(event.target.value)}
+              onChange={(e) => setPin(e.target.value)}
               autoFocus
             />
-            <button type="submit">Unlock</button>
+            <button type="submit" className="btn btn-primary">
+              <ShieldCheck size={16} />
+              <span>Unlock</span>
+            </button>
           </form>
-          {pinError && <p className="error">{pinError}</p>}
-          <Link to="/" className="homeLink">
-            Back to broadcaster
+          {pinError && (
+            <p className="alert">
+              <AlertTriangle size={14} /> {pinError}
+            </p>
+          )}
+          <Link to="/" className="pinBack">
+            <ArrowLeft size={14} /> Back to broadcaster
           </Link>
-        </section>
-      </main>
+        </div>
+      </div>
     )
   }
 
@@ -1402,7 +1445,7 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<HomePage />} />
+        <Route path="/" element={<BroadcasterPage />} />
         <Route path="/watch/:roomId" element={<ViewerPage />} />
         <Route path="/admin" element={<AdminPage />} />
       </Routes>
