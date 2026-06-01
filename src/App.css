@@ -161,6 +161,162 @@ button:hover:not(:disabled),
   font-size: 0.85rem;
 }
 
+.textInput {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(19, 63, 72, 0.35);
+  background: rgba(255, 255, 255, 0.85);
+  padding: 11px 12px;
+  font-size: 0.95rem;
+  color: #173c46;
+  box-sizing: border-box;
+}
+
+.adminFooter {
+  margin-top: 18px;
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+.adminFooter a {
+  color: #d9eef3;
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.5);
+  padding-bottom: 1px;
+}
+
+.endedBanner {
+  margin-top: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(158, 47, 22, 0.4);
+  background: rgba(255, 240, 235, 0.85);
+  padding: 14px 16px;
+}
+
+.endedTitle {
+  margin: 0 0 4px;
+  color: #9e2f16;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.endedBody {
+  margin: 0;
+  color: #6e2914;
+  font-size: 0.92rem;
+}
+
+.adminPage .card {
+  width: min(1100px, 100%);
+}
+
+.adminCard {
+  background: linear-gradient(130deg, rgba(255, 255, 255, 0.94), rgba(223, 240, 246, 0.86));
+}
+
+.adminHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.adminHeader h1 {
+  margin: 0;
+}
+
+.streamGrid {
+  margin-top: 18px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.streamTile {
+  display: block;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0f2f37;
+  color: #f4faff;
+  text-decoration: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 24px rgba(6, 31, 42, 0.18);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.streamTile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 32px rgba(6, 31, 42, 0.26);
+}
+
+.streamThumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(0, 119, 122, 0.7), transparent 60%),
+    linear-gradient(135deg, #0f2f37, #173c46);
+  display: flex;
+  align-items: flex-start;
+  padding: 10px;
+  gap: 6px;
+}
+
+.liveDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff3b30;
+  box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.7);
+  animation: pulse 1.6s infinite;
+  margin-top: 4px;
+}
+
+.liveLabel {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  color: #ffd9d6;
+}
+
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.7); }
+  70%  { box-shadow: 0 0 0 10px rgba(255, 59, 48, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0); }
+}
+
+.streamMeta {
+  padding: 10px 12px 12px;
+}
+
+.streamTitle {
+  margin: 0 0 4px;
+  font-weight: 700;
+  font-size: 0.98rem;
+  word-break: break-word;
+}
+
+.streamSub {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(244, 250, 255, 0.7);
+}
+
+.pinCard {
+  max-width: 420px;
+}
+
+.pinForm {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.pinForm .textInput {
+  flex: 1;
+}
+
 .status {
   margin-top: 14px;
   color: #285660;
