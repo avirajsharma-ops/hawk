@@ -16,7 +16,7 @@ const ADMIN_PEER_ID = 'hawk-admin-presence-mwhawk-v1'
 const ADMIN_PIN = '2001'
 const PRESENCE_HEARTBEAT_MS = 5000
 const PRESENCE_TIMEOUT_MS = 15000
-const ADMIN_RETRY_MS = 10000
+const ADMIN_RETRY_MS = 4000
 const RESUME_STORAGE_KEY = 'hawk-resume-v1'
 
 function readResumeSession() {
@@ -461,12 +461,36 @@ function BroadcasterPage() {
             return
           }
 
-          const msg = peerError?.message || 'Failed to start broadcast'
-          if (peerError?.type === 'network' || peerError?.type === 'server-error') {
-            setError(`${msg} — retrying signaling...`)
+          // Non-fatal errors — keep the stream alive.
+          // `peer-unavailable` fires when our outbound connect to the admin
+          // presence peer fails because no admin dashboard is open yet.
+          // `network`/`server-error`/`disconnected` are signaling blips that
+          // PeerJS handles via its own reconnect.
+          const nonFatal = new Set([
+            'peer-unavailable',
+            'network',
+            'server-error',
+            'disconnected',
+            'socket-error',
+            'socket-closed',
+          ])
+          if (nonFatal.has(peerError?.type)) {
+            if (peerError?.type === 'peer-unavailable') {
+              // Admin dashboard isn't up yet — schedule another presence
+              // attempt so we appear once they open it.
+              closeAdminPresence()
+              if (adminRetryRef.current) clearTimeout(adminRetryRef.current)
+              adminRetryRef.current = setTimeout(
+                () => connectAdminPresenceRef.current(),
+                ADMIN_RETRY_MS
+              )
+            } else {
+              setError(`${peerError.message || 'Signaling issue'} — retrying...`)
+            }
             return
           }
-          setError(msg)
+
+          setError(peerError?.message || 'Failed to start broadcast')
           setStatus('idle')
         })
       }
@@ -482,6 +506,7 @@ function BroadcasterPage() {
     refreshCameras,
     requestWakeLock,
     connectAdminPresence,
+    closeAdminPresence,
     sendPresence,
   ])
 
