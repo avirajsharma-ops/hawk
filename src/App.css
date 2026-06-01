@@ -134,6 +134,33 @@ button:hover:not(:disabled),
   text-decoration-thickness: 2px;
 }
 
+.shareRow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.shareLink {
+  flex: 1;
+  min-width: 200px;
+  word-break: break-all;
+}
+
+.copyBtn {
+  background: #173c46;
+  color: #f5f8fb;
+  padding: 8px 14px;
+  font-size: 0.88rem;
+  border-radius: 10px;
+}
+
+.status.subtle {
+  color: #51737a;
+  font-size: 0.85rem;
+}
+
 .status {
   margin-top: 14px;
   color: #285660;

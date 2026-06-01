@@ -10,15 +10,98 @@ function generateRoomId() {
   return Math.random().toString(36).slice(2, 10)
 }
 
-function looksLikeUsbCamera(device) {
+const BUILTIN_HINTS = /(facetime|built[\s-]*in|integrated|internal|isight)/i
+const USB_HINTS =
+  /(usb|uvc|webcam|brio|logitech|elgato|anker|avermedia|microsoft\s*lifecam|razer|c920|c922|c270|c310|hd\s*pro|v4l|video\d+|\/dev\/video)/i
+
+function classifyCamera(device, allDevices) {
   const searchable = [device.label, device.deviceId, device.groupId]
     .filter(Boolean)
     .join(' ')
 
-  // Raspberry Pi/Linux labels often include usb bus paths like "(usb-0000:01:00.0-1.2)"
-  return /(usb|uvc|webcam|camera\s*\(.*usb|usb-[\w.:-]+|logitech|brio|elgato|anker|avermedia|microsoft)/i.test(
-    searchable
-  )
+  if (BUILTIN_HINTS.test(searchable)) {
+    return { isUsb: false, isBuiltIn: true }
+  }
+  if (USB_HINTS.test(searchable)) {
+    return { isUsb: true, isBuiltIn: false }
+  }
+  // Linux/Raspberry Pi often exposes only "Camera" or empty labels for UVC
+  // devices. If there's exactly one video device and it isn't built-in,
+  // treat it as USB so users see a sensible label.
+  const videoCount = allDevices.filter((d) => d.kind === 'videoinput').length
+  if (videoCount === 1 && device.label) {
+    return { isUsb: true, isBuiltIn: false }
+  }
+  return { isUsb: false, isBuiltIn: false }
+}
+
+// Try a sequence of constraints until one succeeds. Pi/UVC cameras frequently
+// reject "exact" resolution requests, so we fall back progressively.
+async function acquireStream(deviceId) {
+  const audio = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  }
+
+  const videoAttempts = []
+  if (deviceId) {
+    videoAttempts.push({
+      deviceId: { exact: deviceId },
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30, max: 30 },
+    })
+    videoAttempts.push({
+      deviceId: { exact: deviceId },
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 24, max: 30 },
+    })
+    videoAttempts.push({ deviceId: { exact: deviceId } })
+    videoAttempts.push({ deviceId })
+  }
+  videoAttempts.push({
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30, max: 30 },
+  })
+  videoAttempts.push({ width: { ideal: 640 }, height: { ideal: 480 } })
+  videoAttempts.push(true)
+
+  let lastError = null
+  for (const video of videoAttempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video, audio })
+    } catch (err) {
+      lastError = err
+    }
+  }
+  throw lastError || new Error('Unable to access camera')
+}
+
+// Boost outgoing video bitrate on the underlying RTCPeerConnection.
+function tuneSenderBitrate(call) {
+  const pc = call?.peerConnection
+  if (!pc) return
+  try {
+    pc.getSenders().forEach((sender) => {
+      if (sender.track?.kind !== 'video') return
+      const params = sender.getParameters()
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}]
+      }
+      params.encodings.forEach((enc) => {
+        enc.maxBitrate = 2_500_000
+        enc.maxFramerate = 30
+        enc.priority = 'high'
+        enc.networkPriority = 'high'
+      })
+      sender.setParameters(params).catch(() => {})
+    })
+  } catch {
+    // best-effort
+  }
 }
 
 function BroadcasterPage() {
@@ -27,71 +110,81 @@ function BroadcasterPage() {
   const streamRef = useRef(null)
   const wakeLockRef = useRef(null)
   const statusRef = useRef('idle')
+  const activeCallsRef = useRef(new Set())
   const [status, setStatus] = useState('idle')
   const [roomId, setRoomId] = useState('')
   const [error, setError] = useState('')
   const [cameras, setCameras] = useState([])
   const [selectedCameraId, setSelectedCameraId] = useState('')
   const [wakeLockEnabled, setWakeLockEnabled] = useState(false)
+  const [resolution, setResolution] = useState('')
+  const [viewerCount, setViewerCount] = useState(0)
+  const [copyState, setCopyState] = useState('idle')
 
   useEffect(() => {
     statusRef.current = status
   }, [status])
 
   const shareUrl = useMemo(() => {
-    if (!roomId) {
-      return ''
-    }
+    if (!roomId) return ''
     return `${window.location.origin}/watch/${roomId}`
   }, [roomId])
 
   const refreshCameras = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) {
-      return
-    }
+    if (!navigator.mediaDevices?.enumerateDevices) return
 
     const devices = await navigator.mediaDevices.enumerateDevices()
     const cameraDevices = devices
       .filter((device) => device.kind === 'videoinput')
-      .map((device, index) => ({
-        deviceId: device.deviceId,
-        label: device.label || `Camera ${index + 1}`,
-        isUsb: looksLikeUsbCamera(device),
-      }))
+      .map((device, index) => {
+        const { isUsb, isBuiltIn } = classifyCamera(device, devices)
+        return {
+          deviceId: device.deviceId,
+          label: device.label || `Camera ${index + 1}`,
+          isUsb,
+          isBuiltIn,
+        }
+      })
 
     setCameras(cameraDevices)
 
-    setSelectedCameraId((currentValue) => {
-      if (
-        currentValue &&
-        cameraDevices.some((camera) => camera.deviceId === currentValue)
-      ) {
-        return currentValue
+    setSelectedCameraId((current) => {
+      if (current && cameraDevices.some((c) => c.deviceId === current)) {
+        return current
       }
-      return cameraDevices[0]?.deviceId || ''
+      // Prefer USB cameras (Pi use case) when present.
+      const usb = cameraDevices.find((c) => c.isUsb)
+      return usb?.deviceId || cameraDevices[0]?.deviceId || ''
     })
   }, [])
 
-  const releaseWakeLock = useCallback(async () => {
-    if (!wakeLockRef.current) {
-      return
+  // On Raspberry Pi/Chromium, enumerateDevices returns empty labels until the
+  // user has granted media access at least once. Briefly grab the camera to
+  // unlock real device names.
+  const unlockLabels = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      probe.getTracks().forEach((t) => t.stop())
+    } catch {
+      // permission denied or no device; still try to enumerate
     }
+    await refreshCameras()
+  }, [refreshCameras])
 
+  const releaseWakeLock = useCallback(async () => {
+    if (!wakeLockRef.current) return
     await wakeLockRef.current.release().catch(() => {})
     wakeLockRef.current = null
     setWakeLockEnabled(false)
   }, [])
 
   const requestWakeLock = useCallback(async () => {
-    if (!('wakeLock' in navigator) || wakeLockRef.current) {
-      return
-    }
-
+    if (!('wakeLock' in navigator) || wakeLockRef.current) return
     try {
       const wakeLock = await navigator.wakeLock.request('screen')
       wakeLockRef.current = wakeLock
       setWakeLockEnabled(true)
-
       wakeLock.addEventListener('release', () => {
         wakeLockRef.current = null
         setWakeLockEnabled(false)
@@ -102,30 +195,24 @@ function BroadcasterPage() {
   }, [])
 
   const startBroadcast = async () => {
-    if (status === 'starting' || status === 'live') {
-      return
-    }
+    if (status === 'starting' || status === 'live') return
 
     setError('')
     setStatus('starting')
 
     try {
-      const videoConstraint = selectedCameraId
-        ? { deviceId: { exact: selectedCameraId } }
-        : true
-
-      const localStream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraint,
-        audio: true,
-      })
+      const localStream = await acquireStream(selectedCameraId)
       streamRef.current = localStream
 
+      // Permission granted — labels are now available.
       await refreshCameras()
 
-      const activeVideoTrack = localStream.getVideoTracks()[0]
-      const activeDeviceId = activeVideoTrack?.getSettings()?.deviceId
-      if (activeDeviceId) {
-        setSelectedCameraId(activeDeviceId)
+      const videoTrack = localStream.getVideoTracks()[0]
+      const settings = videoTrack?.getSettings() || {}
+      if (settings.deviceId) setSelectedCameraId(settings.deviceId)
+      if (settings.width && settings.height) {
+        const fps = Math.round(settings.frameRate || 0)
+        setResolution(`${settings.width}×${settings.height}${fps ? ` @ ${fps}fps` : ''}`)
       }
 
       if (previewRef.current) {
@@ -133,7 +220,7 @@ function BroadcasterPage() {
       }
 
       const nextRoomId = generateRoomId()
-      const peer = new Peer(nextRoomId)
+      const peer = new Peer(nextRoomId, { debug: 0 })
       peerRef.current = peer
 
       peer.on('open', () => {
@@ -144,12 +231,40 @@ function BroadcasterPage() {
 
       peer.on('connection', (conn) => {
         conn.on('open', () => {
-          peer.call(conn.peer, localStream)
+          const call = peer.call(conn.peer, localStream)
+          if (!call) return
+          activeCallsRef.current.add(call)
+          setViewerCount(activeCallsRef.current.size)
+
+          const tune = () => tuneSenderBitrate(call)
+          if (call.peerConnection) {
+            call.peerConnection.addEventListener('connectionstatechange', () => {
+              if (call.peerConnection.connectionState === 'connected') tune()
+            })
+            setTimeout(tune, 1500)
+          }
+
+          const drop = () => {
+            activeCallsRef.current.delete(call)
+            setViewerCount(activeCallsRef.current.size)
+          }
+          call.on('close', drop)
+          call.on('error', drop)
         })
       })
 
+      peer.on('disconnected', () => {
+        // PeerJS will try to reconnect to its signaling server automatically.
+        try { peer.reconnect() } catch { /* peer already destroyed */ }
+      })
+
       peer.on('error', (peerError) => {
-        setError(peerError.message || 'Failed to start broadcast')
+        const msg = peerError?.message || 'Failed to start broadcast'
+        if (peerError?.type === 'network' || peerError?.type === 'server-error') {
+          setError(`${msg} — retrying signaling...`)
+          return
+        }
+        setError(msg)
         setStatus('idle')
       })
     } catch {
@@ -163,21 +278,31 @@ function BroadcasterPage() {
       peerRef.current.destroy()
       peerRef.current = null
     }
-
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
     }
-
     if (previewRef.current) {
       previewRef.current.srcObject = null
     }
-
+    activeCallsRef.current.clear()
+    setViewerCount(0)
     releaseWakeLock()
-
     setRoomId('')
+    setResolution('')
     setStatus('idle')
     setError('')
+  }
+
+  const copyShareUrl = async () => {
+    if (!shareUrl) return
+    try {
+      await navigator.clipboard.writeText(shareUrl)
+      setCopyState('copied')
+    } catch {
+      setCopyState('failed')
+    }
+    setTimeout(() => setCopyState('idle'), 1500)
   }
 
   useEffect(() => {
@@ -186,9 +311,8 @@ function BroadcasterPage() {
     }, 0)
 
     const onDeviceChange = () => {
-      refreshCameras()
+      void refreshCameras()
     }
-
     navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange)
 
     const onVisibilityChange = () => {
@@ -196,10 +320,9 @@ function BroadcasterPage() {
         requestWakeLock()
       }
     }
-
     document.addEventListener('visibilitychange', onVisibilityChange)
 
-    const teardown = () => {
+    return () => {
       clearTimeout(initialRefresh)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
@@ -208,19 +331,17 @@ function BroadcasterPage() {
         peerRef.current.destroy()
         peerRef.current = null
       }
-
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop())
         streamRef.current = null
       }
-
       releaseWakeLock()
     }
-
-    return () => {
-      teardown()
-    }
   }, [refreshCameras, releaseWakeLock, requestWakeLock])
+
+  const hasRealLabels = cameras.some(
+    (c) => c.label && !/^Camera \d+$/.test(c.label)
+  )
 
   return (
     <main className="page">
@@ -244,17 +365,20 @@ function BroadcasterPage() {
               {cameras.map((camera) => (
                 <option key={camera.deviceId} value={camera.deviceId}>
                   {camera.label}
-                  {camera.isUsb ? ' (USB)' : ''}
+                  {camera.isUsb ? ' • USB' : camera.isBuiltIn ? ' • Built-in' : ''}
                 </option>
               ))}
             </select>
-            <button type="button" className="secondary detectBtn" onClick={refreshCameras}>
+            <button type="button" className="secondary detectBtn" onClick={unlockLabels}>
               Detect Cameras
             </button>
           </div>
           <p className="cameraHint">
-            USB cams are auto-labeled from device identifiers, including
-            Raspberry Pi/Linux usb bus labels.
+            {cameras.length === 0
+              ? 'No camera detected. On Raspberry Pi, plug in the USB webcam, then click Detect Cameras.'
+              : hasRealLabels
+              ? 'USB cams (including Raspberry Pi/Linux UVC devices) are auto-labeled.'
+              : 'Click Detect Cameras and approve permission to reveal device names.'}
           </p>
         </div>
 
@@ -280,17 +404,25 @@ function BroadcasterPage() {
 
         {shareUrl && (
           <div className="shareBox">
-            <p className="status">Live now. Share this URL:</p>
-            <a href={shareUrl} target="_blank" rel="noreferrer">
-              {shareUrl}
-            </a>
+            <p className="status">
+              Live now • {viewerCount} {viewerCount === 1 ? 'viewer' : 'viewers'}
+              {resolution ? ` • ${resolution}` : ''}
+            </p>
+            <div className="shareRow">
+              <a href={shareUrl} target="_blank" rel="noreferrer" className="shareLink">
+                {shareUrl}
+              </a>
+              <button type="button" className="copyBtn" onClick={copyShareUrl}>
+                {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
+              </button>
+            </div>
           </div>
         )}
 
         {error && <p className="error">{error}</p>}
 
         {status === 'live' && (
-          <p className="status">
+          <p className="status subtle">
             Device awake mode: {wakeLockEnabled ? 'On' : 'Not available in this browser'}
           </p>
         )}
@@ -327,9 +459,7 @@ function ViewerPage() {
     }
 
     const stopMediaPlayback = () => {
-      if (!videoRef.current?.srcObject) {
-        return
-      }
+      if (!videoRef.current?.srcObject) return
       const stream = videoRef.current.srcObject
       stream.getTracks().forEach((track) => track.stop())
       videoRef.current.srcObject = null
@@ -351,9 +481,7 @@ function ViewerPage() {
     }
 
     const scheduleReconnect = (message) => {
-      if (cancelled) {
-        return
-      }
+      if (cancelled) return
 
       clearTimers()
       cleanupPeerOnly()
@@ -365,7 +493,7 @@ function ViewerPage() {
       }
 
       attemptRef.current += 1
-      const delayMs = Math.min(30000, 1000 * 2 ** Math.min(attemptRef.current - 1, 5))
+      const delayMs = Math.min(15000, 1000 * 2 ** Math.min(attemptRef.current - 1, 4))
       setStatus('reconnecting')
       setError(message)
 
@@ -375,9 +503,7 @@ function ViewerPage() {
     }
 
     const connect = () => {
-      if (cancelled) {
-        return
-      }
+      if (cancelled) return
 
       clearTimers()
       cleanupPeerOnly()
@@ -392,26 +518,22 @@ function ViewerPage() {
       setStatus(attemptRef.current === 0 ? 'connecting' : 'reconnecting')
       setError('')
 
-      const peer = new Peer()
+      const peer = new Peer({ debug: 0 })
       activePeer = peer
 
       peer.on('open', () => {
-        if (cancelled) {
-          return
-        }
+        if (cancelled) return
 
-        const conn = peer.connect(roomId)
+        const conn = peer.connect(roomId, { reliable: true })
         activeConn = conn
 
         conn.on('open', () => {
-          if (!cancelled) {
-            setStatus('waiting')
-          }
+          if (!cancelled) setStatus('waiting')
         })
 
         conn.on('close', () => {
           if (!gotStream) {
-            scheduleReconnect('Broadcaster not reachable yet. Retrying...')
+            scheduleReconnect('Broadcaster not reachable. Retrying...')
           }
         })
 
@@ -431,14 +553,8 @@ function ViewerPage() {
           setError('')
           if (videoRef.current) {
             videoRef.current.srcObject = remoteStream
-            videoRef.current
-              .play()
-              .then(() => {
-                setStatus('live')
-              })
-              .catch(() => {
-                setStatus('live')
-              })
+            videoRef.current.play().catch(() => {})
+            setStatus('live')
           }
         })
 
@@ -456,24 +572,20 @@ function ViewerPage() {
       })
 
       peer.on('close', () => {
-        if (!cancelled) {
-          scheduleReconnect('Peer closed. Reconnecting...')
-        }
+        if (!cancelled) scheduleReconnect('Peer closed. Reconnecting...')
       })
 
       peer.on('error', (peerError) => {
         if (peerError.type === 'peer-unavailable') {
-          scheduleReconnect('No active broadcaster found yet. Retrying...')
+          scheduleReconnect('Broadcaster not live yet. Retrying...')
           return
         }
         scheduleReconnect(peerError.message || 'Failed to connect. Retrying...')
       })
 
       streamTimerRef.current = window.setTimeout(() => {
-        if (!gotStream) {
-          scheduleReconnect('No live stream yet. Retrying...')
-        }
-      }, 15000)
+        if (!gotStream) scheduleReconnect('No live stream yet. Retrying...')
+      }, 12000)
     }
 
     const onOnline = () => {
