@@ -17,6 +17,31 @@ const ADMIN_PIN = '2001'
 const PRESENCE_HEARTBEAT_MS = 5000
 const PRESENCE_TIMEOUT_MS = 15000
 const ADMIN_RETRY_MS = 10000
+const RESUME_STORAGE_KEY = 'hawk-resume-v1'
+
+function readResumeSession() {
+  try {
+    const raw = localStorage.getItem(RESUME_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeResumeSession(session) {
+  try {
+    localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(session))
+  } catch {
+    // storage may be unavailable; non-fatal
+  }
+}
+
+function clearResumeSession() {
+  try { localStorage.removeItem(RESUME_STORAGE_KEY) } catch { /* noop */ }
+}
 
 function generateRoomId() {
   if (window.crypto?.randomUUID) {
@@ -126,6 +151,7 @@ function HomePage() {
 
 function BroadcasterPage() {
   const previewRef = useRef(null)
+  const adminAudioRef = useRef(null)
   const peerRef = useRef(null)
   const streamRef = useRef(null)
   const wakeLockRef = useRef(null)
@@ -136,7 +162,9 @@ function BroadcasterPage() {
   const adminHeartbeatRef = useRef(null)
   const adminRetryRef = useRef(null)
   const connectAdminPresenceRef = useRef(() => {})
+  const startBroadcastRef = useRef(() => {})
   const presenceStateRef = useRef({ roomId: '', title: '', startedAt: 0 })
+  const autoResumeAttemptedRef = useRef(false)
   const [status, setStatus] = useState('idle')
   const [roomId, setRoomId] = useState('')
   const [error, setError] = useState('')
@@ -147,6 +175,7 @@ function BroadcasterPage() {
   const [viewerCount, setViewerCount] = useState(0)
   const [copyState, setCopyState] = useState('idle')
   const [streamTitle, setStreamTitle] = useState('')
+  const [adminTalking, setAdminTalking] = useState(false)
 
   useEffect(() => {
     statusRef.current = status
@@ -285,22 +314,43 @@ function BroadcasterPage() {
       sendPresence()
       adminHeartbeatRef.current = setInterval(sendPresence, PRESENCE_HEARTBEAT_MS)
     })
+    conn.on('data', (data) => {
+      if (!data || typeof data !== 'object') return
+      if (data.type === 'admin-refresh') {
+        // Persist current session so we auto-resume after reload.
+        const session = presenceStateRef.current
+        if (session.roomId) {
+          writeResumeSession({
+            roomId: session.roomId,
+            title: session.title,
+            cameraId: selectedCameraId,
+            savedAt: Date.now(),
+          })
+        }
+        // Give the message a tick to flush, then reload the page.
+        setTimeout(() => window.location.reload(), 200)
+      }
+    })
     conn.on('close', scheduleRetry)
     conn.on('error', scheduleRetry)
-  }, [closeAdminPresence, sendPresence])
+  }, [closeAdminPresence, sendPresence, selectedCameraId])
 
   useEffect(() => {
     connectAdminPresenceRef.current = connectAdminPresence
   }, [connectAdminPresence])
 
-  const startBroadcast = async () => {
-    if (status === 'starting' || status === 'live') return
+  const startBroadcast = useCallback(async (override = {}) => {
+    if (statusRef.current === 'starting' || statusRef.current === 'live') return
 
     setError('')
     setStatus('starting')
 
+    const desiredRoomId = override.roomId || generateRoomId()
+    const desiredTitle = override.title !== undefined ? override.title : streamTitle.trim()
+    const desiredCameraId = override.cameraId || selectedCameraId
+
     try {
-      const localStream = await acquireStream(selectedCameraId)
+      const localStream = await acquireStream(desiredCameraId)
       streamRef.current = localStream
 
       await refreshCameras()
@@ -317,72 +367,127 @@ function BroadcasterPage() {
         previewRef.current.srcObject = localStream
       }
 
-      const nextRoomId = generateRoomId()
       presenceStateRef.current = {
-        roomId: nextRoomId,
-        title: streamTitle.trim(),
+        roomId: desiredRoomId,
+        title: desiredTitle,
         startedAt: Date.now(),
       }
+      if (desiredTitle !== streamTitle) setStreamTitle(desiredTitle)
 
-      const peer = new Peer(nextRoomId, { debug: 0 })
-      peerRef.current = peer
-
-      peer.on('open', () => {
-        setRoomId(nextRoomId)
-        setStatus('live')
-        requestWakeLock()
-        connectAdminPresence()
+      // Persist session so a remote-triggered refresh can auto-resume.
+      writeResumeSession({
+        roomId: desiredRoomId,
+        title: desiredTitle,
+        cameraId: settings.deviceId || desiredCameraId,
+        savedAt: Date.now(),
       })
 
-      peer.on('connection', (conn) => {
-        viewerConnsRef.current.add(conn)
-        const dropConn = () => viewerConnsRef.current.delete(conn)
-        conn.on('close', dropConn)
-        conn.on('error', dropConn)
+      const createPeer = (attempt = 0) => {
+        const peer = new Peer(desiredRoomId, { debug: 0 })
+        peerRef.current = peer
 
-        conn.on('open', () => {
-          const call = peer.call(conn.peer, streamRef.current || localStream)
-          if (!call) return
-          activeCallsRef.current.add(call)
-          setViewerCount(activeCallsRef.current.size)
-          sendPresence()
+        peer.on('open', () => {
+          setRoomId(desiredRoomId)
+          setStatus('live')
+          requestWakeLock()
+          connectAdminPresence()
+        })
 
-          const tune = () => tuneSenderBitrate(call)
-          if (call.peerConnection) {
-            call.peerConnection.addEventListener('connectionstatechange', () => {
-              if (call.peerConnection.connectionState === 'connected') tune()
-            })
-            setTimeout(tune, 1500)
-          }
+        peer.on('connection', (conn) => {
+          viewerConnsRef.current.add(conn)
+          const dropConn = () => viewerConnsRef.current.delete(conn)
+          conn.on('close', dropConn)
+          conn.on('error', dropConn)
 
-          const dropCall = () => {
-            activeCallsRef.current.delete(call)
+          conn.on('open', () => {
+            const call = peer.call(conn.peer, streamRef.current || localStream)
+            if (!call) return
+            activeCallsRef.current.add(call)
             setViewerCount(activeCallsRef.current.size)
             sendPresence()
-          }
-          call.on('close', dropCall)
-          call.on('error', dropCall)
+
+            const tune = () => tuneSenderBitrate(call)
+            if (call.peerConnection) {
+              call.peerConnection.addEventListener('connectionstatechange', () => {
+                if (call.peerConnection.connectionState === 'connected') tune()
+              })
+              setTimeout(tune, 1500)
+            }
+
+            const dropCall = () => {
+              activeCallsRef.current.delete(call)
+              setViewerCount(activeCallsRef.current.size)
+              sendPresence()
+            }
+            call.on('close', dropCall)
+            call.on('error', dropCall)
+          })
         })
-      })
 
-      peer.on('disconnected', () => {
-        try { peer.reconnect() } catch { /* peer destroyed */ }
-      })
+        // Admin push-to-talk: admin calls broadcaster with their mic stream.
+        peer.on('call', (incomingCall) => {
+          if (incomingCall.metadata?.kind !== 'admin-ptt') {
+            try { incomingCall.close() } catch { /* noop */ }
+            return
+          }
+          incomingCall.answer() // we don't send media back
+          incomingCall.on('stream', (remoteStream) => {
+            const el = adminAudioRef.current
+            if (!el) return
+            el.srcObject = remoteStream
+            el.muted = false
+            el.play().catch(() => {})
+            setAdminTalking(true)
+          })
+          const stopTalking = () => {
+            const el = adminAudioRef.current
+            if (el) el.srcObject = null
+            setAdminTalking(false)
+          }
+          incomingCall.on('close', stopTalking)
+          incomingCall.on('error', stopTalking)
+        })
 
-      peer.on('error', (peerError) => {
-        const msg = peerError?.message || 'Failed to start broadcast'
-        if (peerError?.type === 'network' || peerError?.type === 'server-error') {
-          setError(`${msg} — retrying signaling...`)
-          return
-        }
-        setError(msg)
-        setStatus('idle')
-      })
+        peer.on('disconnected', () => {
+          try { peer.reconnect() } catch { /* peer destroyed */ }
+        })
+
+        peer.on('error', (peerError) => {
+          // After a refresh, the PeerJS broker may still hold the previous
+          // ID for a few seconds. Retry a few times before failing.
+          if (peerError?.type === 'unavailable-id' && attempt < 6) {
+            try { peer.destroy() } catch { /* noop */ }
+            setTimeout(() => createPeer(attempt + 1), 2000)
+            return
+          }
+
+          const msg = peerError?.message || 'Failed to start broadcast'
+          if (peerError?.type === 'network' || peerError?.type === 'server-error') {
+            setError(`${msg} — retrying signaling...`)
+            return
+          }
+          setError(msg)
+          setStatus('idle')
+        })
+      }
+
+      createPeer()
     } catch {
       setError('Camera/microphone permission is required to go live.')
       setStatus('idle')
     }
-  }
+  }, [
+    streamTitle,
+    selectedCameraId,
+    refreshCameras,
+    requestWakeLock,
+    connectAdminPresence,
+    sendPresence,
+  ])
+
+  useEffect(() => {
+    startBroadcastRef.current = startBroadcast
+  }, [startBroadcast])
 
   const stopBroadcast = () => {
     // Tell viewers cleanly that the stream ended, then admin, then tear down.
@@ -424,6 +529,8 @@ function BroadcasterPage() {
     activeCallsRef.current.clear()
     viewerConnsRef.current.clear()
     presenceStateRef.current = { roomId: '', title: '', startedAt: 0 }
+    clearResumeSession()
+    setAdminTalking(false)
     setViewerCount(0)
     releaseWakeLock()
     setRoomId('')
@@ -447,6 +554,20 @@ function BroadcasterPage() {
     const initialRefresh = window.setTimeout(() => {
       void refreshCameras()
     }, 0)
+
+    // Auto-resume after a remote admin-triggered refresh.
+    const resume = readResumeSession()
+    if (resume && resume.roomId && !autoResumeAttemptedRef.current) {
+      autoResumeAttemptedRef.current = true
+      // Wait briefly for camera permission state and devices to settle.
+      window.setTimeout(() => {
+        startBroadcastRef.current({
+          roomId: resume.roomId,
+          title: resume.title || '',
+          cameraId: resume.cameraId || '',
+        })
+      }, 600)
+    }
 
     const onDeviceChange = () => {
       void refreshCameras()
@@ -540,11 +661,16 @@ function BroadcasterPage() {
       </div>
 
       <video ref={previewRef} autoPlay playsInline muted className="video" />
+      <audio ref={adminAudioRef} autoPlay playsInline />
+
+      {adminTalking && (
+        <p className="adminTalkingBanner">🔊 Admin is talking to you</p>
+      )}
 
       <div className="actions">
         <button
           type="button"
-          onClick={startBroadcast}
+          onClick={() => startBroadcast()}
           disabled={status === 'starting' || status === 'live'}
         >
           {status === 'starting' ? 'Starting...' : 'Go Live'}
@@ -593,9 +719,36 @@ function ViewerPage() {
   const reconnectTimerRef = useRef(null)
   const streamTimerRef = useRef(null)
   const attemptRef = useRef(0)
-  const everHadStreamRef = useRef(false)
   const [status, setStatus] = useState('connecting')
   const [error, setError] = useState('')
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFsChange)
+    document.addEventListener('webkitfullscreenchange', onFsChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange)
+      document.removeEventListener('webkitfullscreenchange', onFsChange)
+    }
+  }, [])
+
+  const toggleFullscreen = async () => {
+    const el = videoRef.current
+    if (!el) return
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      } else if (el.requestFullscreen) {
+        await el.requestFullscreen()
+      } else if (el.webkitEnterFullscreen) {
+        // iOS Safari: video element only
+        el.webkitEnterFullscreen()
+      }
+    } catch {
+      // ignore — user denied or unsupported
+    }
+  }
 
   useEffect(() => {
     let activePeer = null
@@ -722,7 +875,6 @@ function ViewerPage() {
 
         call.on('stream', (remoteStream) => {
           gotStream = true
-          everHadStreamRef.current = true
           attemptRef.current = 0
           clearTimers()
           setError('')
@@ -752,12 +904,8 @@ function ViewerPage() {
 
       peer.on('error', (peerError) => {
         if (peerError.type === 'peer-unavailable') {
-          // If we already played the stream and the broadcaster vanishes,
-          // treat it as ended rather than retrying forever.
-          if (everHadStreamRef.current) {
-            markEnded()
-            return
-          }
+          // Broadcaster may be refreshing (admin-triggered or otherwise).
+          // Keep retrying — only an explicit "bye" message ends the stream.
           scheduleReconnect('Broadcaster not live yet. Retrying...')
           return
         }
@@ -832,9 +980,11 @@ function ViewerPage() {
 
         {error && status !== 'ended' && <p className="error">{error}</p>}
 
-        <Link to="/" className="homeLink">
-          Start your own stream
-        </Link>
+        <div className="viewerActions">
+          <button type="button" onClick={toggleFullscreen}>
+            {isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+          </button>
+        </div>
       </section>
     </main>
   )
@@ -854,15 +1004,115 @@ function formatDuration(ms) {
 function AdminDashboard({ onSignOut }) {
   const peerRef = useRef(null)
   const streamsRef = useRef(new Map())
+  const connsRef = useRef(new Map()) // roomId -> DataConnection (broadcaster presence)
   const sweeperRef = useRef(null)
+  const pttRef = useRef({ peerId: null, call: null, stream: null })
   const [streams, setStreams] = useState([])
   const [adminStatus, setAdminStatus] = useState('connecting')
   const [adminError, setAdminError] = useState('')
   const [now, setNow] = useState(() => Date.now())
+  const [pttActiveRoom, setPttActiveRoom] = useState('')
+  const [pttSpeaking, setPttSpeaking] = useState(false)
+  const [pttError, setPttError] = useState('')
 
   const publish = useCallback(() => {
     setStreams(Array.from(streamsRef.current.values()).sort((a, b) => b.startedAt - a.startedAt))
   }, [])
+
+  const endPttSession = useCallback(() => {
+    const session = pttRef.current
+    if (session.stream) {
+      session.stream.getTracks().forEach((t) => t.stop())
+    }
+    if (session.call) {
+      try { session.call.close() } catch { /* noop */ }
+    }
+    pttRef.current = { peerId: null, call: null, stream: null }
+    setPttActiveRoom('')
+    setPttSpeaking(false)
+  }, [])
+
+  const setTalking = useCallback((on) => {
+    const stream = pttRef.current.stream
+    if (!stream) return
+    stream.getAudioTracks().forEach((track) => { track.enabled = on })
+    setPttSpeaking(on)
+  }, [])
+
+  const startPttSession = useCallback(async (room) => {
+    setPttError('')
+    const peer = peerRef.current
+    if (!peer || peer.destroyed) {
+      setPttError('Admin signaling not ready.')
+      return false
+    }
+
+    // If switching streams, tear down the previous session.
+    if (pttRef.current.peerId && pttRef.current.peerId !== room.roomId) {
+      endPttSession()
+    }
+    if (pttRef.current.peerId === room.roomId && pttRef.current.call) {
+      return true
+    }
+
+    let micStream
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      })
+    } catch {
+      setPttError('Microphone permission is required for push-to-talk.')
+      return false
+    }
+
+    micStream.getAudioTracks().forEach((track) => { track.enabled = false })
+
+    const call = peer.call(room.roomId, micStream, { metadata: { kind: 'admin-ptt' } })
+    if (!call) {
+      micStream.getTracks().forEach((t) => t.stop())
+      setPttError('Could not place admin call to this stream.')
+      return false
+    }
+
+    pttRef.current = { peerId: room.roomId, call, stream: micStream }
+    setPttActiveRoom(room.roomId)
+
+    const stop = () => {
+      if (pttRef.current.call === call) endPttSession()
+    }
+    call.on('close', stop)
+    call.on('error', stop)
+    return true
+  }, [endPttSession])
+
+  const handleRefresh = useCallback((room) => {
+    const conn = connsRef.current.get(room.roomId)
+    if (!conn || !conn.open) {
+      setAdminError('Broadcaster channel not available for refresh.')
+      return
+    }
+    try {
+      conn.send({ type: 'admin-refresh' })
+    } catch {
+      setAdminError('Failed to send refresh command.')
+    }
+  }, [])
+
+  const handlePttDown = useCallback(async (room) => {
+    const ok = pttRef.current.peerId === room.roomId
+      ? true
+      : await startPttSession(room)
+    if (ok) setTalking(true)
+  }, [startPttSession, setTalking])
+
+  const handlePttUp = useCallback(() => {
+    setTalking(false)
+  }, [setTalking])
 
   useEffect(() => {
     const peer = new Peer(ADMIN_PEER_ID, { debug: 0 })
@@ -874,9 +1124,12 @@ function AdminDashboard({ onSignOut }) {
 
     peer.on('connection', (conn) => {
       // Each broadcaster opens a presence conn; track liveness via heartbeats.
+      let assignedRoom = ''
       conn.on('data', (data) => {
         if (!data || typeof data !== 'object') return
         if (data.type === 'presence' && data.roomId) {
+          assignedRoom = data.roomId
+          connsRef.current.set(data.roomId, conn)
           streamsRef.current.set(data.roomId, {
             roomId: data.roomId,
             title: data.title || '',
@@ -888,19 +1141,21 @@ function AdminDashboard({ onSignOut }) {
           publish()
         } else if (data.type === 'bye' && data.roomId) {
           streamsRef.current.delete(data.roomId)
+          connsRef.current.delete(data.roomId)
           publish()
         }
       })
 
       conn.on('close', () => {
-        // Remove any stream entries tied to this broadcaster peer.
         let changed = false
         streamsRef.current.forEach((entry, key) => {
           if (entry.peerId === conn.peer) {
             streamsRef.current.delete(key)
+            connsRef.current.delete(key)
             changed = true
           }
         })
+        if (assignedRoom) connsRef.current.delete(assignedRoom)
         if (changed) publish()
       })
     })
@@ -926,13 +1181,13 @@ function AdminDashboard({ onSignOut }) {
       try { peer.reconnect() } catch { /* noop */ }
     })
 
-    // Sweep stale entries (no heartbeat in window).
     sweeperRef.current = setInterval(() => {
-      const now = Date.now()
+      const t = Date.now()
       let changed = false
       streamsRef.current.forEach((entry, key) => {
-        if (now - entry.lastSeen > PRESENCE_TIMEOUT_MS) {
+        if (t - entry.lastSeen > PRESENCE_TIMEOUT_MS) {
           streamsRef.current.delete(key)
+          connsRef.current.delete(key)
           changed = true
         }
       })
@@ -941,42 +1196,47 @@ function AdminDashboard({ onSignOut }) {
     }, 2000)
 
     const streamsMap = streamsRef.current
+    const connsMap = connsRef.current
     return () => {
       if (sweeperRef.current) {
         clearInterval(sweeperRef.current)
         sweeperRef.current = null
       }
+      endPttSession()
       if (peerRef.current) {
         peerRef.current.destroy()
         peerRef.current = null
       }
       streamsMap.clear()
+      connsMap.clear()
     }
-  }, [publish])
+  }, [publish, endPttSession])
 
   return (
     <main className="page adminPage">
       <section className="card adminCard">
         <div className="adminHeader">
-          <h1>Admin Dashboard</h1>
+          <div>
+            <h1>Admin Dashboard</h1>
+            <p className="status subtle">
+              {adminStatus === 'connecting' && 'Connecting to presence channel...'}
+              {adminStatus === 'listening' && `${streams.length} live stream${streams.length === 1 ? '' : 's'}`}
+              {adminStatus === 'reconnecting' && 'Reconnecting to signaling...'}
+              {adminStatus === 'conflict' && 'Dashboard conflict'}
+              {adminStatus === 'error' && 'Dashboard error'}
+            </p>
+          </div>
           <button type="button" className="secondary" onClick={onSignOut}>
             Sign out
           </button>
         </div>
 
-        <p className="status">
-          {adminStatus === 'connecting' && 'Connecting to presence channel...'}
-          {adminStatus === 'listening' && `Live streams: ${streams.length}`}
-          {adminStatus === 'reconnecting' && 'Reconnecting to signaling...'}
-          {adminStatus === 'conflict' && 'Dashboard conflict'}
-          {adminStatus === 'error' && 'Dashboard error'}
-        </p>
-
         {adminError && <p className="error">{adminError}</p>}
+        {pttError && <p className="error">{pttError}</p>}
 
         {streams.length === 0 && adminStatus === 'listening' && (
-          <p className="cameraHint">
-            No active streams right now. Streams appear here as soon as a
+          <p className="emptyState">
+            No active streams right now. Streams will appear here the moment a
             broadcaster goes live.
           </p>
         )}
@@ -984,28 +1244,65 @@ function AdminDashboard({ onSignOut }) {
         <div className="streamGrid">
           {streams.map((stream) => {
             const watchUrl = `/watch/${stream.roomId}`
+            const isPttActive = pttActiveRoom === stream.roomId
             return (
-              <Link
-                key={stream.roomId}
-                to={watchUrl}
-                className="streamTile"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <div className="streamThumb">
-                  <span className="liveDot" />
-                  <span className="liveLabel">LIVE</span>
-                </div>
+              <div key={stream.roomId} className="streamTile">
+                <a
+                  href={watchUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="streamThumbLink"
+                >
+                  <div className="streamThumb">
+                    <span className="liveBadge">
+                      <span className="liveDot" /> LIVE
+                    </span>
+                    <span className="viewerBadge">
+                      👁 {stream.viewerCount}
+                    </span>
+                  </div>
+                </a>
                 <div className="streamMeta">
                   <p className="streamTitle">
                     {stream.title || `Stream ${stream.roomId}`}
                   </p>
                   <p className="streamSub">
-                    {stream.roomId} • {formatDuration(now - stream.startedAt)} •{' '}
-                    {stream.viewerCount} {stream.viewerCount === 1 ? 'viewer' : 'viewers'}
+                    {stream.roomId} • {formatDuration(now - stream.startedAt)}
                   </p>
+                  <div className="streamActions">
+                    <a
+                      href={watchUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="tileBtn primary"
+                    >
+                      Open
+                    </a>
+                    <button
+                      type="button"
+                      className="tileBtn"
+                      onClick={() => handleRefresh(stream)}
+                      title="Reload the broadcaster page and auto-resume this stream"
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      className={`tileBtn ptt ${isPttActive && pttSpeaking ? 'speaking' : ''}`}
+                      onPointerDown={(event) => {
+                        event.preventDefault()
+                        handlePttDown(stream)
+                      }}
+                      onPointerUp={handlePttUp}
+                      onPointerLeave={handlePttUp}
+                      onPointerCancel={handlePttUp}
+                      title="Hold to talk to this broadcaster"
+                    >
+                      {isPttActive && pttSpeaking ? '🎤 Talking' : '🎤 Hold to Talk'}
+                    </button>
+                  </div>
                 </div>
-              </Link>
+              </div>
             )
           })}
         </div>
