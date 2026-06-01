@@ -494,6 +494,17 @@ body { color: var(--ink); background: var(--bg); }
   font-weight: 500;
 }
 
+.adoptRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 10px;
+}
+.adoptRow .input { flex: 1; }
+
 .emptyState {
   margin: auto;
   text-align: center;

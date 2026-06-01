@@ -1360,6 +1360,7 @@ function AdminDashboard({ onSignOut }) {
   const [pttActiveRoom, setPttActiveRoom] = useState('')
   const [pttSpeaking, setPttSpeaking] = useState(false)
   const [pttError, setPttError] = useState('')
+  const [adoptInput, setAdoptInput] = useState('')
 
   const publish = useCallback(() => {
     setStreams(Array.from(streamsRef.current.values()).sort((a, b) => b.startedAt - a.startedAt))
@@ -1395,6 +1396,38 @@ function AdminDashboard({ onSignOut }) {
     conn.on('close', cleanup)
     conn.on('error', cleanup)
   }, [])
+
+  const rememberRoom = useCallback((roomId) => {
+    try {
+      const raw = localStorage.getItem('hawk-admin-known-rooms')
+      const list = raw ? JSON.parse(raw) : []
+      if (Array.isArray(list) && !list.includes(roomId)) {
+        list.push(roomId)
+        // Keep most-recent 20
+        const trimmed = list.slice(-20)
+        localStorage.setItem('hawk-admin-known-rooms', JSON.stringify(trimmed))
+      }
+    } catch { /* noop */ }
+  }, [])
+
+  const adoptRoom = useCallback((roomId) => {
+    const id = (roomId || '').trim()
+    if (!id) return
+    rememberRoom(id)
+    if (!streamsRef.current.has(id)) {
+      streamsRef.current.set(id, {
+        roomId: id,
+        title: '',
+        startedAt: Date.now(),
+        viewerCount: 0,
+        lastSeen: Date.now(),
+        peerId: null,
+        adopted: true,
+      })
+      publish()
+    }
+    requestPreview(id)
+  }, [publish, requestPreview, rememberRoom])
 
   const endPttSession = useCallback(() => {
     const s = pttRef.current
@@ -1474,6 +1507,22 @@ function AdminDashboard({ onSignOut }) {
         call.on('stream', (remote) => {
           previewsRef.current.set(call.peer, remote)
           watchCallsRef.current.set(call.peer, call)
+          rememberRoom(call.peer)
+          if (!streamsRef.current.has(call.peer)) {
+            streamsRef.current.set(call.peer, {
+              roomId: call.peer,
+              title: '',
+              startedAt: Date.now(),
+              viewerCount: 0,
+              lastSeen: Date.now(),
+              peerId: null,
+              adopted: true,
+            })
+            publish()
+          } else {
+            const existing = streamsRef.current.get(call.peer)
+            existing.lastSeen = Date.now()
+          }
           setPreviewsTick((t) => t + 1)
         })
         const stop = () => {
@@ -1502,6 +1551,7 @@ function AdminDashboard({ onSignOut }) {
               lastSeen: Date.now(),
               peerId: conn.peer,
             })
+            rememberRoom(data.roomId)
             publish()
             if (isNew) requestPreview(data.roomId)
           } else if (data.type === 'bye' && data.roomId) {
@@ -1566,10 +1616,42 @@ function AdminDashboard({ onSignOut }) {
 
     tryClaim(0)
 
+    // Auto-adopt previously seen rooms in case presence doesn't auto-register.
+    try {
+      const raw = localStorage.getItem('hawk-admin-known-rooms')
+      const list = raw ? JSON.parse(raw) : []
+      if (Array.isArray(list)) {
+        list.forEach((id) => {
+          if (typeof id !== 'string' || !id) return
+          if (streamsRef.current.has(id)) return
+          streamsRef.current.set(id, {
+            roomId: id,
+            title: '',
+            startedAt: Date.now(),
+            viewerCount: 0,
+            lastSeen: Date.now(),
+            peerId: null,
+            adopted: true,
+          })
+        })
+        publish()
+      }
+    } catch { /* noop */ }
+
     sweeperRef.current = setInterval(() => {
       const t = Date.now()
       let changed = false
       streamsRef.current.forEach((entry, key) => {
+        const hasPreview = previewsRef.current.has(key)
+        if (entry.adopted) {
+          // Adopted entries are kept alive by the preview call, not presence.
+          if (!hasPreview && !watchConnsRef.current.has(key) && t - entry.lastSeen > PRESENCE_TIMEOUT_MS) {
+            streamsRef.current.delete(key)
+            connsRef.current.delete(key)
+            changed = true
+          }
+          return
+        }
         if (t - entry.lastSeen > PRESENCE_TIMEOUT_MS) {
           streamsRef.current.delete(key)
           connsRef.current.delete(key)
@@ -1607,7 +1689,7 @@ function AdminDashboard({ onSignOut }) {
       watchCallsMap.clear()
       previewsMap.clear()
     }
-  }, [publish, endPttSession, requestPreview, dropPreview])
+  }, [publish, endPttSession, requestPreview, dropPreview, rememberRoom])
 
   return (
     <div className="app adminApp">
@@ -1643,11 +1725,34 @@ function AdminDashboard({ onSignOut }) {
           </div>
         )}
 
+        <form
+          className="adoptRow"
+          onSubmit={(e) => {
+            e.preventDefault()
+            adoptRoom(adoptInput)
+            setAdoptInput('')
+          }}
+        >
+          <input
+            type="text"
+            className="input"
+            placeholder="Add stream by Room ID (e.g. 441cceb2)"
+            value={adoptInput}
+            onChange={(e) => setAdoptInput(e.target.value)}
+            spellCheck={false}
+            autoCapitalize="off"
+          />
+          <button type="submit" className="btn btn-primary" disabled={!adoptInput.trim()}>
+            <Eye size={16} />
+            <span>Add</span>
+          </button>
+        </form>
+
         {streams.length === 0 && adminStatus === 'listening' && (
           <div className="emptyState">
             <Radio size={36} />
             <h2>No active streams</h2>
-            <p>Streams appear here as soon as a broadcaster goes live.</p>
+            <p>Streams appear here as soon as a broadcaster goes live, or add one by Room ID above.</p>
           </div>
         )}
 
