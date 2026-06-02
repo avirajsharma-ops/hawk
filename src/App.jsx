@@ -784,9 +784,17 @@ function BroadcasterPage() {
         })
 
         peer.on('error', (peerError) => {
-          if (peerError?.type === 'unavailable-id' && attempt < 6) {
+          if (peerError?.type === 'unavailable-id' && attempt < 20) {
+            // Broker is still holding the prior peer id (common right after
+            // a reload). Retry for up to ~40s before giving up.
             try { peer.destroy() } catch { /* noop */ }
             setTimeout(() => createPeer(attempt + 1), 2000)
+            return
+          }
+          if (peerError?.type === 'unavailable-id') {
+            setError('Room ID is busy. Try again in a few seconds or pick a new one.')
+            setStatus('idle')
+            clearResumeSession()
             return
           }
           const nonFatal = new Set([
@@ -905,9 +913,30 @@ function BroadcasterPage() {
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
 
+    // On reload/close, destroy the PeerJS connection cleanly so the broker
+    // releases the room id immediately. Without this, the next page load
+    // hits `unavailable-id` for ~30s and the broadcaster gets stuck on
+    // "starting" — especially painful on Android where reload is common.
+    const onPageHide = () => {
+      try {
+        viewerConnsRef.current.forEach((c) => {
+          if (c.open) { try { c.send({ type: 'bye', reason: 'broadcaster-unload' }) } catch { /* noop */ } }
+        })
+        adminSlotsRef.current.forEach(({ conn }) => {
+          if (conn?.open) { try { conn.send({ type: 'bye', roomId: presenceStateRef.current.roomId }) } catch { /* noop */ } }
+        })
+      } catch { /* noop */ }
+      try { peerRef.current?.destroy() } catch { /* noop */ }
+      peerRef.current = null
+    }
+    window.addEventListener('pagehide', onPageHide)
+    window.addEventListener('beforeunload', onPageHide)
+
     return () => {
       clearTimeout(initialRefresh)
       clearTimeout(initialPreview)
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('beforeunload', onPageHide)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
       if (adminRetryRef.current) {
@@ -2093,6 +2122,10 @@ function AdminDashboard({ onSignOut }) {
       if (data.type === 'camera-capabilities') {
         capsRef.current.set(roomId, data.caps || null)
         setPreviewsTick((t) => t + 1)
+      } else if (data.type === 'bye') {
+        // Broadcaster cleanly stopped — drop the tile immediately.
+        forgetRoom(roomId)
+        publish()
       }
     })
     const cleanup = () => {
