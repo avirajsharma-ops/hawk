@@ -1950,7 +1950,7 @@ function ViewerPage() {
               </div>
             )}
             {isAdminMode && showControls && (
-              <div className="adminCtrlWrap">
+              <DraggablePanel className="adminCtrlWrap" storageKey="hawk.cameraControls.pos">
                 {controlError && (
                   <div className="toast"><AlertTriangle size={14} /> {controlError}</div>
                 )}
@@ -1962,7 +1962,7 @@ function ViewerPage() {
                     onClose={() => setShowControls(false)}
                   />
                 </CameraControlsBoundary>
-              </div>
+              </DraggablePanel>
             )}
             {isAdminMode ? (
               <div className="adminDock">
@@ -2089,8 +2089,115 @@ function PreviewVideo({ stream }) {
   )
 }
 
-class CameraControlsBoundary extends Component {
-  constructor(props) {
+function DraggablePanel({ className = '', storageKey, children }) {
+  const wrapRef = useRef(null)
+  const [pos, setPos] = useState(() => {
+    if (!storageKey) return null
+    try {
+      const raw = window.localStorage.getItem(storageKey)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') return parsed
+    } catch { /* noop */ }
+    return null
+  })
+  const dragRef = useRef(null)
+
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+
+    const onPointerDown = (e) => {
+      const handle = e.target.closest('[data-drag-handle="true"]')
+      if (!handle || !wrap.contains(handle)) return
+      // Ignore drags that start on interactive controls inside the handle.
+      if (e.target.closest('button, a, input, select, textarea')) return
+      if (e.button !== undefined && e.button !== 0) return
+      const rect = wrap.getBoundingClientRect()
+      dragRef.current = {
+        pointerId: e.pointerId,
+        offsetX: e.clientX - rect.left,
+        offsetY: e.clientY - rect.top,
+        width: rect.width,
+        height: rect.height,
+      }
+      // Seed position so the first move doesn't jump.
+      setPos((prev) => prev || { x: rect.left, y: rect.top })
+      try { handle.setPointerCapture(e.pointerId) } catch { /* noop */ }
+      handle.style.cursor = 'grabbing'
+      e.preventDefault()
+    }
+
+    const onPointerMove = (e) => {
+      const d = dragRef.current
+      if (!d || d.pointerId !== e.pointerId) return
+      const margin = 8
+      const maxX = window.innerWidth - d.width - margin
+      const maxY = window.innerHeight - d.height - margin
+      const x = Math.min(Math.max(margin, e.clientX - d.offsetX), Math.max(margin, maxX))
+      const y = Math.min(Math.max(margin, e.clientY - d.offsetY), Math.max(margin, maxY))
+      setPos({ x, y })
+    }
+
+    const onPointerUp = (e) => {
+      const d = dragRef.current
+      if (!d || d.pointerId !== e.pointerId) return
+      dragRef.current = null
+      const handle = e.target.closest('[data-drag-handle="true"]')
+      if (handle) {
+        handle.style.cursor = ''
+        try { handle.releasePointerCapture(e.pointerId) } catch { /* noop */ }
+      }
+      if (storageKey) {
+        setPos((current) => {
+          if (current && typeof current.x === 'number') {
+            try { window.localStorage.setItem(storageKey, JSON.stringify(current)) } catch { /* noop */ }
+          }
+          return current
+        })
+      }
+    }
+
+    wrap.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerUp)
+    return () => {
+      wrap.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+    }
+  }, [storageKey])
+
+  // Keep panel in-viewport across window resizes.
+  useEffect(() => {
+    if (!pos) return
+    const onResize = () => {
+      const wrap = wrapRef.current
+      if (!wrap) return
+      const rect = wrap.getBoundingClientRect()
+      const margin = 8
+      const maxX = Math.max(margin, window.innerWidth - rect.width - margin)
+      const maxY = Math.max(margin, window.innerHeight - rect.height - margin)
+      setPos((p) => p ? { x: Math.min(p.x, maxX), y: Math.min(p.y, maxY) } : p)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [pos])
+
+  const style = pos
+    ? { position: 'fixed', left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto', bottom: 'auto', margin: 0, zIndex: 60 }
+    : undefined
+
+  return (
+    <div ref={wrapRef} className={`${className} draggablePanel${pos ? ' isDragged' : ''}`} style={style}>
+      {children}
+    </div>
+  )
+}
+
+class CameraControlsBoundary extends Component {  constructor(props) {
     super(props)
     this.state = { error: null }
   }
@@ -2100,7 +2207,7 @@ class CameraControlsBoundary extends Component {
     if (this.state.error) {
       return (
         <div className="ctrlPanel">
-          <div className="ctrlHeader">
+          <div className="ctrlHeader" data-drag-handle="true">
             <span><Sliders size={14} /> Camera controls</span>
             <button type="button" className="iconBtn" onClick={this.props.onClose} aria-label="Close">
               <ChevronUp size={14} />
@@ -2123,7 +2230,7 @@ function CameraControls({ caps, onChange, onSoftwareChange, onClose }) {
   const hwEntries = hardware ? Object.entries(hardware) : []
   return (
     <div className="ctrlPanel">
-      <div className="ctrlHeader">
+      <div className="ctrlHeader" data-drag-handle="true">
         <span><Sliders size={14} /> Camera controls</span>
         <button type="button" className="iconBtn" onClick={onClose} aria-label="Close">
           <ChevronUp size={14} />
@@ -3011,14 +3118,19 @@ function AdminDashboard({ onSignOut }) {
                     </button>
                   </div>
                   {showControls && (
-                    <CameraControlsBoundary onClose={() => setOpenControls('')}>
-                      <CameraControls
-                        caps={caps}
-                        onChange={(constraints) => sendCameraControl(stream.roomId, constraints)}
-                        onSoftwareChange={(settings) => sendSoftwareControl(stream.roomId, settings)}
-                        onClose={() => setOpenControls('')}
-                      />
-                    </CameraControlsBoundary>
+                    <DraggablePanel
+                      className="adminCardCtrlWrap"
+                      storageKey={`hawk.cameraControls.admin.${stream.roomId}.pos`}
+                    >
+                      <CameraControlsBoundary onClose={() => setOpenControls('')}>
+                        <CameraControls
+                          caps={caps}
+                          onChange={(constraints) => sendCameraControl(stream.roomId, constraints)}
+                          onSoftwareChange={(settings) => sendSoftwareControl(stream.roomId, settings)}
+                          onClose={() => setOpenControls('')}
+                        />
+                      </CameraControlsBoundary>
+                    </DraggablePanel>
                   )}
                 </div>
               </article>
